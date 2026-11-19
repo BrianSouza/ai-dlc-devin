@@ -1,0 +1,64 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-start", "timeout": 1800 }
+      ]
+    }
+  ],
+  "SessionEnd": [
+    {
+      "matcher": "",
+      "hooks": [
+        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-end", "timeout": 60 }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "matcher": "",
+      "hooks": [
+        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" mint", "timeout": 1800 }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "^(exec|read|write|edit|apply_patch|notebook_read|notebook_edit|grep|glob|run_subagent|ask_user_question)$",
+      "hooks": [
+        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" guards", "timeout": 1800 }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "^(write|edit|apply_patch|notebook_edit|run_subagent)$",
+      "hooks": [
+        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" audit-and-sensors", "timeout": 3600 }
+      ]
+    },
+    {
+      "matcher": "^exec$",
+      "hooks": [
+        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" runtime-compile", "timeout": 1800 }
+      ]
+    }
+  ],
+  "PostCompaction": [
+    {
+      "matcher": "",
+      "hooks": [
+        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" validate-state", "timeout": 1800 }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "matcher": "",
+      "hooks": [
+        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" stop", "timeout": 3600 }
+      ]
+    }
+  ]
+}

@@ -425,12 +425,12 @@ function transform(
     s = substituteToken(s, harnessDir, invoke, letters);
     s = applyRulesRename(s, harnessDir, rulesRename);
     if (harness) s = projectTierFrontmatter(s, srcPath, harness);
-    // Cursor, opencode, and Copilot persona bodies read the method by path:
+    // Cursor, opencode, Copilot, and Devin persona bodies read the method by path:
     // the engine's git-ignored copy of the active space's memory
     // (aidlc-includes.ts ACTIVE_MEMORY_DIR), the same path on every install.
     const posixPath = srcPath.split(sep).join("/");
     if (
-      (harness === "cursor" || harness === "opencode" || harness === "copilot") &&
+      (harness === "cursor" || harness === "opencode" || harness === "copilot" || harness === "devin") &&
       posixPath.includes("/agents/") &&
       posixPath.endsWith("-agent.md")
     ) {
@@ -1108,6 +1108,7 @@ function buildTree(
     });
   }
   expandCursorToolAllows(treeRoot, m);
+  expandDevinToolAllows(treeRoot, m);
   expandClaudeToolAllows(treeRoot, m);
   expandKiroToolAllows(treeRoot, m);
   expandKiroIdeConductorAllows(treeRoot, m, invoke);
@@ -1379,6 +1380,52 @@ function rewriteCursorNativePermissions(outRoot: string, m: HarnessManifest): vo
   writeFileSync(cliPath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+// Devin's authored config.json names AI-DLC's tool scripts with one glob.
+// Devin's Exec(<prefix>) matches a command prefix as whole words (no globs),
+// so the projection lists, in its place, each dispatcher command a copy
+// channel pre-approves exactly as AI-DLC runs it, and each tool script it
+// pre-approves by its full path. Both trees get it; the native rewrite then
+// drops every bun entry.
+function expandDevinToolAllows(treeRoot: string, m: HarnessManifest): void {
+  if (m.tierFlavor !== "devin") return;
+  const configPath = join(treeRoot, "config.json");
+  const value = JSON.parse(readFileSync(configPath, "utf-8")) as { permissions?: { allow?: unknown } };
+  const allow = value.permissions?.allow;
+  const glob = `Exec(bun ${m.harnessDir}/tools/aidlc-*)`;
+  if (!Array.isArray(allow) || !allow.includes(glob)) {
+    throw new Error(`[devin] config.json has no ${glob} entry to expand`);
+  }
+  const tool = (script: string) => `Exec(bun ${m.harnessDir}/tools/${script}`;
+  value.permissions!.allow = allow.flatMap((entry) =>
+    entry === glob
+      ? [
+        ...copyChannelDispatcherCommands().map((command) => `${tool("aidlc.ts")} ${command})`),
+        ...copyChannelToolScripts().map((script) => `${tool(script)})`),
+      ]
+      : [entry]
+  );
+  writeFileSync(configPath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function rewriteDevinNativePermissions(outRoot: string, m: HarnessManifest): void {
+  if (m.tierFlavor !== "devin") return;
+  const configPath = join(outRoot, m.harnessDir, "config.json");
+  const value = JSON.parse(readFileSync(configPath, "utf-8")) as { permissions?: { allow?: unknown } };
+  const allow = value.permissions?.allow;
+  if (!Array.isArray(allow)) throw new Error("[devin] config.json has no permissions.allow list");
+  // The copy channel's bun entries give way to the one trusted prefix (whole
+  // words, so it covers every engine route) and the exact read-only and
+  // turn-back-on commands, run as the installed aidlc command.
+  value.permissions!.allow = [
+    ...allow.filter((entry) =>
+      !(typeof entry === "string" && (entry.startsWith("Exec(bun ") || entry.startsWith("Exec(aidlc ")))
+    ),
+    `Exec(${trustedCommand()})`,
+    ...nativeDispatcherCommands().map((command) => `Exec(${command})`),
+  ];
+  writeFileSync(configPath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
 // The native Permissions line for the `aidlc` agent, which only Kiro's trees
 // ship; their native allow list carries the exact read-only and turn-back-on
 // commands, so the line names them.
@@ -1500,8 +1547,9 @@ function rewriteNativeInvocations(
     "codex-adapter": true,
     "cursor-adapter": true,
     "copilot-adapter": true,
+    "devin-adapter": true,
   };
-  const projectPrefix = String.raw`(?:"?(?:\$\{?CLAUDE_PROJECT_DIR\}?/)?`;
+  const projectPrefix = String.raw`(?:"?(?:\$\{?(?:CLAUDE|DEVIN)_PROJECT_DIR\}?/)?`;
   const suffix = `"?)`;
   const toolPattern = new RegExp(
     String.raw`\bbun\s+${projectPrefix}${harnessDir}/tools/aidlc(?:-([a-z0-9-]+))?\.ts${suffix}`,
@@ -1528,7 +1576,7 @@ function rewriteNativeInvocations(
     );
     value = value.replace(escapedJsonDispatcher, "aidlc");
     const escapedJsonHook = new RegExp(
-      String.raw`\bbun\s+\\"\$CLAUDE_PROJECT_DIR/${harnessDir}/hooks/aidlc-([a-z0-9-]+)\.ts\\"`,
+      String.raw`\bbun\s+\\"\$(?:CLAUDE|DEVIN)_PROJECT_DIR/${harnessDir}/hooks/aidlc-([a-z0-9-]+)\.ts\\"`,
       "gi",
     );
     value = value.replace(escapedJsonHook, (_match, hook: string) => {
@@ -1596,6 +1644,7 @@ function rewriteNativeInvocations(
   rewriteKiroNativeAllowlists(outRoot, m);
   rewriteClaudeNativePermissions(outRoot, m);
   rewriteCursorNativePermissions(outRoot, m);
+  rewriteDevinNativePermissions(outRoot, m);
   if (m.tierFlavor === "codex") {
     const { emitDefaultRules, emitTrustSeed } = require(
       join(HARNESS_ROOT, m.name, "emit.ts"),

@@ -12,6 +12,7 @@ type ReviewerScopeRegistration =
   | "codex-hooks"
   | "copilot-hooks"
   | "cursor-hooks"
+  | "devin-hooks"
   | "kiro-agent-json"
   | "opencode-plugin"
   | "unsupported";
@@ -37,6 +38,7 @@ type HarnessCapabilities = {
     | "codex-engine"
     | "copilot-agents-md"
     | "cursor-rule"
+    | "devin-rule"
     | "kiro-resources"
     | "kiro-steering"
     | "opencode-instructions";
@@ -132,6 +134,27 @@ const HARNESS_CAPABILITIES = {
     kiroAgentJson: false,
     ideAgentTools: false,
     reviewerScopeRegistration: "cursor-hooks",
+  },
+  devin: {
+    harnessDir: ".devin",
+    onboarding: {
+      mode: "manifest",
+      fills: "onboarding.fills.ts",
+      dist: "AGENTS.md",
+      harnessDist: ".devin/rules/aidlc-onboarding.md",
+    },
+    rootFiles: [".gitignore", "AGENTS.md"],
+    skillsRoot: ".devin/skills",
+    plugin: {
+      kind: "store",
+      manifestDir: ".devin-plugin",
+      marketplaceDir: ".devin-plugin",
+      wiringFile: "hooks/hooks.json",
+    },
+    memoryInclude: "devin-rule",
+    kiroAgentJson: false,
+    ideAgentTools: false,
+    reviewerScopeRegistration: "devin-hooks",
   },
   "kiro-ide": {
     harnessDir: ".kiro",
@@ -305,7 +328,9 @@ function validateManifest(
         manifest.harnessDir === ".aidlc" &&
         manifest.skipRunnerGen === true) ||
     (capabilities.memoryInclude === "cursor-rule") !==
-      manifest.harnessFiles.some((file) => file.dst === "rules/aidlc.mdc")
+      manifest.harnessFiles.some((file) => file.dst === "rules/aidlc.mdc") ||
+    (capabilities.memoryInclude === "devin-rule") !==
+      manifest.harnessFiles.some((file) => file.dst === "rules/aidlc-method.md")
   ) {
     fail(name, "memoryInclude does not agree with manifest-owned include surfaces");
   }

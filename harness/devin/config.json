@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(bun {{HARNESS_DIR}}/tools/aidlc.ts engine)",
+      "Exec(bun {{HARNESS_DIR}}/tools/aidlc-*)"
+    ],
+    "deny": []
+  }
+}

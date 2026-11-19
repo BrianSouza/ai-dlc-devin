@@ -114,6 +114,12 @@ export type TierProjection = {
    *  accounts reject every named model), so a pinned id would hard-fail
    *  installs on lower plans; agents inherit the session model instead. */
   cursor: { model: string | null };
+  /** Devin CLI custom-subagent .md frontmatter: `model:` (a Devin model name
+   *  such as "opus" or "sonnet"). Model-only, and every tier ships null:
+   *  Devin has no "inherit" value (an unpinned profile runs on Devin's
+   *  default subagent model) and its model names are plan- and
+   *  org-allowlist-dependent, so a pinned name could refuse every spawn. */
+  devin: { model: string | null };
 };
 
 export type Harness = keyof TierProjection;
@@ -130,6 +136,7 @@ export const TIER_PROJECTIONS: Record<Tier, TierProjection> = {
     opencode: { model: null, variant: null },
     copilot: { model: null },
     cursor: { model: null },
+    devin: { model: null },
   },
   balanced: {
     // Effort pinned to medium. Balanced is the reviewer tier - both
@@ -143,6 +150,7 @@ export const TIER_PROJECTIONS: Record<Tier, TierProjection> = {
     kiro: { model: null },
     opencode: { model: null, variant: "medium" },
     copilot: { model: null },
+    devin: { model: null },
   },
   templated: {
     // The tier remains a models-dial group for pattern-following work, but the
@@ -154,6 +162,7 @@ export const TIER_PROJECTIONS: Record<Tier, TierProjection> = {
     opencode: { model: null, variant: null },
     copilot: { model: null },
     cursor: { model: null },
+    devin: { model: null },
   },
 };
 
