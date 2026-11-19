@@ -23,11 +23,13 @@ const RELEASE_DISTRIBUTIONS = [
   "codex",
   "copilot",
   "cursor",
-  "devin",
   "kiro",
   "kiro-ide",
   "opencode",
 ] as const;
+// This fork's own harness: a release built here carries it, and one built
+// before it, or by upstream, does not, so both inventories verify.
+const FORK_DISTRIBUTIONS = ["devin"] as const;
 
 function releaseAssets(version: string): Map<string, {
   kind: "binary" | "runtime" | "installer";
@@ -190,7 +192,10 @@ export function verifyCandidateManifest(directory: string, tag: string, expected
   const distributionNames = manifest.distributions
     .map((distribution) => distribution.name)
     .sort();
-  if (!sameStrings(distributionNames, RELEASE_DISTRIBUTIONS)) {
+  if (
+    !sameStrings(distributionNames, RELEASE_DISTRIBUTIONS) &&
+    !sameStrings(distributionNames, [...RELEASE_DISTRIBUTIONS, ...FORK_DISTRIBUTIONS].sort())
+  ) {
     throw new Error("version.json has an invalid distribution inventory");
   }
   const assetNames = manifest.assets.map((asset) => asset.name);
