@@ -57,6 +57,7 @@ nav = [
       "guide/harnesses/kiro.md",
       "guide/harnesses/codex-cli.md",
       "guide/harnesses/cursor.md",
+      "guide/harnesses/devin.md",
       "guide/harnesses/opencode.md",
       "guide/harnesses/copilot.md",
     ] },

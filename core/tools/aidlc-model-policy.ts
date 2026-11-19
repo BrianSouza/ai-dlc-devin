@@ -45,6 +45,7 @@ export type ModelHarness =
   | "codex"
   | "copilot"
   | "cursor"
+  | "devin"
   | "kiro"
   | "kiro-ide"
   | "opencode";
@@ -168,6 +169,17 @@ export const HARNESS_HONESTY = Object.freeze({
     message:
       "GitHub Copilot runs every agent on the model you choose in its model picker (/model in the Copilot CLI), so a model or effort set here is kept for other tools and changes nothing in GitHub Copilot.",
   }),
+  // Devin custom subagents take a `model:` name, but AI-DLC ships none and
+  // does not write one (Devin's model names depend on the plan and the
+  // organization's allowlist), so a model or effort recorded here is kept for
+  // other tools only.
+  devin: Object.freeze({
+    model: false,
+    effort: false,
+    groupEffort: false,
+    message:
+      "Devin runs each subagent on its default subagent model and the main agent on the model you choose with /model, so a model or effort set here is kept for other tools and changes nothing in Devin.",
+  }),
 });
 
 type HarnessHonesty = {
@@ -213,6 +225,7 @@ export const HARNESS_PRODUCT_NAMES: Readonly<Record<ModelHarness, string>> = Obj
   codex: "Codex CLI",
   copilot: "GitHub Copilot",
   cursor: "Cursor",
+  devin: "Devin CLI",
   kiro: "Kiro CLI",
   "kiro-ide": "Kiro",
   opencode: "opencode",

@@ -17,6 +17,7 @@ Onboarding is installed in each harness's native instruction surface:
 | Kiro CLI and Kiro IDE | `.kiro/steering/aidlc-onboarding.md` |
 | Codex CLI | `.codex/onboarding.md` (also injected through `developer_instructions` in `.codex/config.toml` when the project is trusted) |
 | Cursor | `.cursor/rules/aidlc-onboarding.mdc` |
+| Devin CLI (this fork) | `.devin/rules/aidlc-onboarding.md` |
 | opencode | `.aidlc/onboarding.md` |
 | GitHub Copilot | Root `AGENTS.md` (full onboarding, including method imports) |
 
@@ -58,6 +59,7 @@ Pick your harness:
 | **Kiro CLI** (≥ 2.6), listed in setup as Kiro CLI (V2) (`--harness kiro-v2`) | `/aidlc` | [Kiro CLI (V2)](kiro.md#kiro-cli-v2), a section of the same page — the harness that pins no engine: prerequisites, install, what's different on Kiro. For Kiro's v3 engine on Kiro CLI ≥ 2.24.1, use Kiro above. |
 | **Codex CLI** (≥ 0.145.0) | `$aidlc` | [AI-DLC on Codex CLI](codex-cli.md) — prerequisites, trust pre-seed, Bedrock config, the git-repo requirement. |
 | **Cursor** | `/aidlc` | [AI-DLC on Cursor](cursor.md) — one tree for the Cursor IDE and CLI, native subagents and skills, the hooks.json adapter, what's different on Cursor. |
+| **Devin CLI** and Devin Desktop (this fork only) | `/aidlc` | [AI-DLC on Devin](devin.md) — custom subagents and skills in `.devin/`, the `hooks.v1.json` adapter, manual-copy install, what's different on Devin. |
 | **opencode** (1.18.29 or newer, or OpenCode 2) | `/aidlc` | [AI-DLC on opencode](opencode.md) — the split `.aidlc/` + `.opencode/` layout, the adapter plugin, what's different on opencode. |
 | **GitHub Copilot** (CLI ≥ 1.0.74 / VS Code ≥ 1.130) | `/aidlc` | [AI-DLC on GitHub Copilot](copilot.md) — one install for both surfaces, the `.github/` merge, folder trust, what's different on Copilot. |
 

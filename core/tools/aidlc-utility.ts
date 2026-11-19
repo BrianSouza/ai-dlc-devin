@@ -4194,6 +4194,9 @@ export async function collectDoctorReport(
       if (currentHarnessDir === ".cursor") {
         trustFiles.push(join(harnessRoot, "cli.json"));
       }
+      if (currentHarnessDir === ".devin") {
+        trustFiles.push(join(harnessRoot, "config.json"), join(harnessRoot, "hooks.v1.json"));
+      }
       if (currentHarnessName === "copilot") {
         trustFiles.push(join(projectDir, ".github", "hooks", "aidlc.json"));
       }
@@ -4290,6 +4293,10 @@ export async function collectDoctorReport(
           hashes.every((hash) => seedText.includes(`trusted_hash = "${hash}"`));
       } else if (currentHarnessDir === ".cursor") {
         nativePermission = commands.includes(cursorTrustedShell());
+      } else if (currentHarnessDir === ".devin") {
+        // Devin's Exec(<prefix>) matches the prefix as whole words, so one
+        // entry covers every engine route.
+        nativePermission = commands.includes(`Exec(${trustedCommand()})`);
       } else if (currentHarnessName === "copilot") {
         // Copilot has no project command allowlist. Its folder-trust contract
         // is checked separately below; this row verifies native hook wiring.
@@ -4770,6 +4777,7 @@ export async function collectDoctorReport(
       );
     }
     if (harness === ".cursor") tsHooks.push("aidlc-cursor-adapter");
+    if (harness === ".devin") tsHooks.push("aidlc-devin-adapter");
     for (const h of tsHooks) {
       const hookPath = join(projectDir, harness, "hooks", `${h}.ts`);
       results.push({
@@ -4954,6 +4962,35 @@ export async function collectDoctorReport(
       label: "project is in a git repository (Cursor may skip project hooks outside one)",
       fix: "run `git init` in this project, then fully restart Cursor and trust the folder",
     });
+  } else if (harness === ".devin") {
+    // Devin CLI: hooks.v1.json (the hook wiring), config.json (permissions),
+    // and the standing + phase method rules are all inside .devin/.
+    for (const [file, what] of [
+      ["hooks.v1.json", "hook wiring"],
+      ["config.json", "AI-DLC command permission pre-approval"],
+      ["skills/aidlc/SKILL.md", "/aidlc skill"],
+      ["rules/aidlc-method.md", "standing method rule (always-on read instruction)"],
+      ["rules/aidlc-phase-ideation.md", "Ideation phase rule (model-decided read instruction)"],
+      ["rules/aidlc-phase-inception.md", "Inception phase rule (model-decided read instruction)"],
+      ["rules/aidlc-phase-construction.md", "Construction phase rule (model-decided read instruction)"],
+      ["rules/aidlc-phase-operation.md", "Operation phase rule (model-decided read instruction)"],
+    ] as const) {
+      results.push({
+        pass: existsSync(join(projectDir, harness, file)),
+        label: `${file} present (${what})`,
+        fix: projectedFileRepair("devin", `.devin/${file}`),
+      });
+    }
+    // Devin CLI also imports another tool's AI-DLC hooks (.claude/settings.json)
+    // unless the person turns that import off, so the hooks would run twice.
+    if (existsSync(join(projectDir, ".claude", "settings.json"))) {
+      results.push({
+        pass: true,
+        severity: "warn",
+        label: "a .claude/ install is here too: Devin CLI imports its hooks by default, so AI-DLC's hooks may run twice",
+        fix: 'set "read_config_from": { "claude": false } in your Devin user config (~/.config/devin/config.json)',
+      });
+    }
   } else if (harness === ".aidlc") {
     // opencode: the wiring config is the project-root opencode.json/jsonc
     // (permissions + the method-include instructions glob) plus the /aidlc
@@ -7490,6 +7527,7 @@ const SCAN_EXCLUDE = new Set([
   ".opencode",
   ".aidlc",
   ".cursor",
+  ".devin",
   "aidlc-docs",
   "node_modules",
   ".git",

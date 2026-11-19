@@ -117,11 +117,14 @@ export type ProviderKind = "current" | "amazon-bedrock" | "builtin" | "other";
 
 // Kiro CLI and Kiro IDE provide their own model access. AI-DLC has no provider
 // decision to ask, write, or check for them, even when a legacy answer exists.
-export type BedrockOrientedHarness = Exclude<ModelHarness, "kiro" | "kiro-ide">;
+export type BedrockOrientedHarness = Exclude<ModelHarness, "kiro" | "kiro-ide" | "devin">;
 
 const HARNESS_OWNED_MODEL_ACCESS: ReadonlySet<ModelHarness> = new Set<ModelHarness>([
   "kiro",
   "kiro-ide",
+  // Devin's models come with the Devin account (Cognition hosts them); there
+  // is no provider for AI-DLC to configure.
+  "devin",
 ]);
 
 export function harnessOwnsModelAccess(
@@ -583,6 +586,7 @@ export function readConfigDiagnosticRecords(harnessRoot: string): ConfigDiagnost
     distribution !== "codex" &&
     distribution !== "copilot" &&
     distribution !== "cursor" &&
+    distribution !== "devin" &&
     distribution !== "kiro" &&
     distribution !== "kiro-ide" &&
     distribution !== "opencode"
@@ -923,6 +927,13 @@ const HARNESS_CLI: Record<
     command: "cursor",
     required: false,
     install: "Install the Cursor CLI and ensure `cursor --version` works; IDE-only installs may omit it.",
+  },
+  // Devin CLI: skills, custom subagents, .devin/hooks.v1.json and
+  // .devin/config.json permissions are what this distribution relies on.
+  devin: {
+    command: "devin",
+    required: true,
+    install: "Install Devin CLI (https://cli.devin.ai) and ensure `devin --version` works.",
   },
   // The 2.x line is where the hooks, skills and workspace default agent this
   // distribution relies on shipped; the guide asks for 2.6 or later.

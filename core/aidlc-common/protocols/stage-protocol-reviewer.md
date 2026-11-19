@@ -440,6 +440,12 @@ If `directive.reviewer` is present, invoke the reviewer as a sub-agent (via the 
 
 ---
 
+### Devin CLI
+
+If `directive.reviewer` is present, invoke the reviewer as a sub-agent (via the `run_subagent` tool targeting the reviewer agent).
+
+---
+
 ### opencode
 
 If `directive.reviewer` is present, invoke the reviewer as a sub-agent (via the `task` tool targeting the reviewer agent).

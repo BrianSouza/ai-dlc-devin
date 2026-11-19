@@ -1257,6 +1257,36 @@ describe("t221 (c) harness registration and protocol prose", () => {
     }
   });
 
+  test("Devin hooks.v1.json wires the adapter's guards target on PreToolUse", () => {
+    const harnesses = HARNESS_MATRIX.filter(
+      (harness) => harness.capabilities.reviewerScopeRegistration === "devin-hooks",
+    );
+    expect(harnesses.length).toBeGreaterThan(0);
+    for (const harness of harnesses) {
+      // Devin's hooks file IS the hooks object (no wrapper key); the single
+      // "guards" target runs the state-transition guard AND the reviewer-scope
+      // bound, adapter-ordered like Cursor's.
+      const wiring = JSON.parse(
+        readFileSync(join(harness.engineRoot, "hooks.v1.json"), "utf-8"),
+      ) as Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>>;
+      const pre = wiring.PreToolUse ?? [];
+      expect(
+        pre.some((group) =>
+          group.hooks.some((h) =>
+            h.command ===
+              `bun "$DEVIN_PROJECT_DIR/${harness.manifest.harnessDir}/hooks/aidlc-devin-adapter.ts" guards`
+          )
+        ),
+      ).toBe(true);
+      const adapter = readFileSync(
+        join(harness.engineRoot, "hooks", "aidlc-devin-adapter.ts"),
+        "utf-8",
+      );
+      expect(adapter).toContain("aidlc-reviewer-scope.ts");
+      expect(adapter).toContain("aidlc-state-transition-guard.ts");
+    }
+  });
+
   test("reviewer protocol module carries the dispatch-record write, and leaves the delete to the engine", () => {
     // The dispatch record is per Unit, so it is in the per-Unit review module.
     const body = readFileSync(
