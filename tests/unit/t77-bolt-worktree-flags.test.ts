@@ -1,0 +1,639 @@
+// covers: subcommand:aidlc-bolt:start, subcommand:aidlc-bolt:complete, subcommand:aidlc-bolt:abort, subcommand:aidlc-bolt:fail
+// covers: function:renderEngineInvocation
+//
+// t77 - aidlc-bolt.ts worktree-flag lifecycle.
+//
+// Mechanism: CLI (spawnSync of the real aidlc-bolt.ts via BUN). Every
+// assertion lives on a process-boundary seam that an in-process import cannot
+// reach faithfully:
+//   - exit codes from `error()` (emitError) and `failJson()` (process.exit(1)),
+//   - the JSON envelopes printed to STDOUT (success {forked|merged|discarded}
+//     tokens AND the failure shape {ok,slug,stage,reason,detail}),
+//   - the audit shard bytes written by the spawned state-fork / audit-fork
+//     sibling subprocesses (STATE_FORKED / AUDIT_FORKED emitted *inside* those
+//     children, not in this process), and
+//   - the forked worktree state file the state-fork child writes.
+// The --worktree / --merge paths fan out to real sibling subprocesses
+// (aidlc-state.ts fork/merge, aidlc-audit.ts audit-fork/audit-merge,
+// aidlc-runtime.ts fragment-fork/merge) via spawnSibling (aidlc-bolt.ts),
+// so the contract is only observable end-to-end through the spawned binary.
+//
+// Source under test (dist/claude/.claude/tools/aidlc-bolt.ts):
+//   handleStart    - --worktree requires --slug, rejects csv --name; validates
+//                    state shape before BOLT_STARTED; emits BOLT_STARTED THEN
+//                    delegates to state-fork -> audit-fork -> fragment-fork.
+//                    Success stdout carries forked:[STATE_FORKED,AUDIT_FORKED,
+//                    RUNTIME_GRAPH_FORKED]. On a sibling failure: failBolt()
+//                    BOLT_FAILED recovery row + failJson("start-worktree",...).
+//   handleComplete - --merge requires --slug, rejects csv --name; emits
+//                    BOLT_COMPLETED then state-merge -> audit-merge ->
+//                    fragment-merge; success stdout merged:[STATE_MERGED,
+//                    AUDIT_MERGED,RUNTIME_GRAPH_MERGED]. state-merge removes
+//                    the slug from main's Bolt Refs.
+//   handleFail     - --name + --error required; --slug optional, recorded as
+//                    the **Bolt slug** audit field for halt-and-ask correlation.
+//   handleAbort    - --name + --slug + --reason all required; emits BOLT_FAILED
+//                    with **Reason**: aborted - no new event type; default (no
+//                    --discard) preserves the worktree and reports
+//                    discarded:false on stdout.
+//   failJson       - prints {ok:false,slug,stage,reason,detail} JSON and
+//                       process.exit(1). The five-field halt-and-ask envelope.
+//   aidlc-record-core.ts worktreePath(pd, id8, slug) locates the intent-scoped Bolt.
+
+import {
+  NATIVE_MULTI_WORKTREE_CASE_TIMEOUT_MS,
+  NATIVE_STARTUP_TIMEOUT_MS,
+  remainingOperationTimeoutMs,
+} from "../harness/test-budget.ts";
+import { afterEach, beforeEach, describe, expect, test, setDefaultTimeout } from "bun:test";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import { appendAuditEntry } from "../../dist/claude/.claude/tools/aidlc-audit.ts";
+import { boltName, worktreePath } from "../../dist/claude/.claude/tools/aidlc-lib.ts";
+import {
+  fixtureIntentId8,
+  AIDLC_SRC,
+  DEFAULT_RECORD_DIR,
+  DEFAULT_SPACE,
+  cleanupTestProject,
+  createTestProject,
+  resetAidlcEnv,
+  seedAuditFile,
+  seedStateFile,
+  seededAuditDir,
+  seededStateFile,
+} from "../harness/fixtures.ts";
+
+setDefaultTimeout(NATIVE_MULTI_WORKTREE_CASE_TIMEOUT_MS);
+
+const BUN = process.execPath;
+const TOOL = join(AIDLC_SRC, "tools", "aidlc-bolt.ts");
+
+interface Run {
+  status: number;
+  out: string; // combined stdout+stderr
+}
+
+function runBolt(args: string[]): Run {
+  const res = spawnSync(BUN, [TOOL, ...args], { timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), encoding: "utf-8" });
+  return {
+    status: res.status ?? -1,
+    out: `${res.stdout ?? ""}${res.stderr ?? ""}`,
+  };
+}
+
+/**
+ * A v7 state fixture + the audit sample, optionally pre-creating the worktree
+ * dir so the fork primitive does not reject.
+ */
+function setupV7Project(withWorktree?: string): string {
+  const proj = createTestProject();
+  seedStateFile(proj, "state-construction.md");
+  seedAuditFile(proj);
+  if (withWorktree) {
+    mkdirSync(worktreePath(proj, fixtureIntentId8(proj), withWorktree), {
+      recursive: true,
+    });
+  }
+  return proj;
+}
+
+function statePath(proj: string): string {
+  return seededStateFile(proj);
+}
+// Audit is a per-clone SHARD DIR; the fixture pins the clone id, so the tool
+// writes into the shard seedAuditFile seeded. Readers glob audit/*.md and
+// merge, so the exact-line `**Event**:` matches below still work on the
+// concatenation.
+function readAudit(proj: string): string {
+  const dir = seededAuditDir(proj);
+  let names: string[];
+  try {
+    names = readdirSync(dir)
+      .filter((f) => f.endsWith(".md"))
+      .sort();
+  } catch {
+    return "";
+  }
+  return names.map((n) => readFileSync(join(dir, n), "utf-8")).join("\n");
+}
+// The worktree mirror carries the SAME relative record dir as the main checkout.
+function wtStatePath(proj: string, slug: string): string {
+  return join(worktreePath(proj, fixtureIntentId8(proj), slug), "aidlc",
+  "spaces",
+  DEFAULT_SPACE,
+  "intents",
+  DEFAULT_RECORD_DIR,
+  "aidlc-state.md",);
+}
+
+let projects: string[] = [];
+function track(proj: string): string {
+  projects.push(proj);
+  return proj;
+}
+
+beforeEach(() => resetAidlcEnv());
+afterEach(() => {
+  for (const p of projects) cleanupTestProject(p);
+  projects = [];
+});
+
+describe("t77 aidlc-bolt worktree flags — start --worktree (migrated from t77-bolt-worktree-flags.sh, plan 28)", () => {
+  test("start --worktree without --slug exits 1 [.sh T1]", () => {
+    const proj = track(setupV7Project());
+    const r = runBolt([
+      "start", "--name", "Foo", "--batch", "1", "--worktree",
+      "--project-dir", proj,
+    ]);
+    expect(r.status).toBe(1);
+    // Pin the diagnostic so a future refactor can't make an unrelated error pass
+    // this row.
+    expect(r.out).toContain("--worktree requires --slug");
+  });
+
+  test("start --worktree rejects csv --name [.sh T2]", () => {
+    const proj = track(setupV7Project());
+    const r = runBolt([
+      "start", "--name", "Foo,Bar", "--batch", "1", "--worktree",
+      "--slug", "foo", "--project-dir", proj,
+    ]);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("requires a single bolt name");
+  });
+
+  test("start --worktree happy path exits 0 + reports slug [.sh T3]", () => {
+    const proj = track(setupV7Project("happy"));
+    const r = runBolt([
+      "start", "--name", "Happy", "--batch", "1", "--worktree",
+      "--slug", "happy", "--project-dir", proj,
+    ]);
+    expect(r.status).toBe(0);
+    const parsed = JSON.parse(r.out.trim());
+    expect(parsed.slug).toBe("happy");
+  });
+
+  test("stdout reports forked:[STATE_FORKED,AUDIT_FORKED,RUNTIME_GRAPH_FORKED] [.sh T4]", () => {
+    const proj = track(setupV7Project("happy"));
+    const r = runBolt([
+      "start", "--name", "Happy", "--batch", "1", "--worktree",
+      "--slug", "happy", "--project-dir", proj,
+    ]);
+    expect(r.out).toContain(
+      '"forked":["STATE_FORKED","AUDIT_FORKED","RUNTIME_GRAPH_FORKED"]',
+    );
+    const parsed = JSON.parse(r.out.trim());
+    expect(parsed.forked).toEqual([
+      "STATE_FORKED", "AUDIT_FORKED", "RUNTIME_GRAPH_FORKED",
+    ]);
+  });
+
+  test("BOLT_STARTED emitted to audit [.sh T5]", () => {
+    const proj = track(setupV7Project("happy"));
+    runBolt([
+      "start", "--name", "Happy", "--batch", "1", "--worktree",
+      "--slug", "happy", "--project-dir", proj,
+    ]);
+    const audit = readAudit(proj);
+    expect(
+      audit.split("\n").some((l) => l === "**Event**: BOLT_STARTED"),
+    ).toBe(true);
+  });
+
+  test("STATE_FORKED emitted by the milestone 9 fork primitive [.sh T6]", () => {
+    const proj = track(setupV7Project("happy"));
+    runBolt([
+      "start", "--name", "Happy", "--batch", "1", "--worktree",
+      "--slug", "happy", "--project-dir", proj,
+    ]);
+    const audit = readAudit(proj);
+    expect(
+      audit.split("\n").some((l) => l === "**Event**: STATE_FORKED"),
+    ).toBe(true);
+  });
+
+  test("AUDIT_FORKED emitted by the milestone 10 audit-fork primitive [.sh T7]", () => {
+    const proj = track(setupV7Project("happy"));
+    runBolt([
+      "start", "--name", "Happy", "--batch", "1", "--worktree",
+      "--slug", "happy", "--project-dir", proj,
+    ]);
+    const audit = readAudit(proj);
+    expect(
+      audit.split("\n").some((l) => l === "**Event**: AUDIT_FORKED"),
+    ).toBe(true);
+  });
+
+  test("atomicity ordering: BOLT_STARTED precedes STATE_FORKED [.sh T8]", () => {
+    const proj = track(setupV7Project("happy"));
+    runBolt([
+      "start", "--name", "Happy", "--batch", "1", "--worktree",
+      "--slug", "happy", "--project-dir", proj,
+    ]);
+    const lines = readAudit(proj).split("\n");
+    let bs = -1;
+    let sf = -1;
+    lines.forEach((l, i) => {
+      if (l === "**Event**: BOLT_STARTED") bs = i;
+      if (l === "**Event**: STATE_FORKED") sf = i;
+    });
+    expect(bs).toBeGreaterThanOrEqual(0);
+    expect(sf).toBeGreaterThanOrEqual(0);
+    expect(bs).toBeLessThan(sf);
+  });
+
+  test("main Bolt Refs contains the slug after fork [.sh T9]", () => {
+    const proj = track(setupV7Project("happy"));
+    runBolt([
+      "start", "--name", "Happy", "--batch", "1", "--worktree",
+      "--slug", "happy", "--project-dir", proj,
+    ]);
+    const refsLine =
+      readFileSync(statePath(proj), "utf-8")
+        .split("\n")
+        .find((l) => l.includes("Bolt Refs")) ?? "";
+    expect(refsLine).toContain("happy");
+  });
+
+  test("forked worktree state file exists [.sh T10]", () => {
+    const proj = track(setupV7Project("happy"));
+    runBolt([
+      "start", "--name", "Happy", "--batch", "1", "--worktree",
+      "--slug", "happy", "--project-dir", proj,
+    ]);
+    expect(existsSync(wtStatePath(proj, "happy"))).toBe(true);
+  });
+});
+
+describe("t77 — start --worktree failure envelope (readonly state)", () => {
+  // Chmod main state 444 so the state-fork child can read it but fails to WRITE
+  // the updated Bolt Refs back - state-fork exits 1, so handleStart routes
+  // through failJson("start-worktree",...). One run drives six assertions on
+  // the same envelope.
+  function readonlyEnvelope(slug: string): { run: Run; env: Record<string, unknown> } {
+    const proj = track(setupV7Project(slug));
+    chmodSync(statePath(proj), 0o444);
+    try {
+      const run = runBolt([
+        "start", "--name", "Env", "--batch", "1", "--worktree",
+        "--slug", slug, "--project-dir", proj,
+      ]);
+      // Recover the LAST JSON object printed (failBolt may log before failJson;
+      // the failure envelope is the last full line of stdout).
+      const line =
+        run.out
+          .trim()
+          .split("\n")
+          .reverse()
+          .find((l) => l.trim().startsWith("{")) ?? "{}";
+      return { run, env: JSON.parse(line) };
+    } finally {
+      chmodSync(statePath(proj), 0o644);
+    }
+  }
+
+  test("start --worktree fails on readonly state (exit 1) [.sh T11]", () => {
+    const { run } = readonlyEnvelope("blocked");
+    expect(run.status).toBe(1);
+  });
+
+  test("failure envelope ok:false [.sh T12]", () => {
+    const { run } = readonlyEnvelope("blocked");
+    expect(run.out).toContain('"ok":false');
+  });
+
+  test("failure envelope stage=start-worktree [.sh T13]", () => {
+    const { run } = readonlyEnvelope("blocked");
+    expect(run.out).toContain('"stage":"start-worktree"');
+  });
+
+  test("failure envelope contains slug field [.sh T25]", () => {
+    const { run, env } = readonlyEnvelope("envtest");
+    expect(run.out).toContain('"slug":"envtest"');
+    expect(env.slug).toBe("envtest");
+  });
+
+  test("failure envelope reason field is non-empty [.sh T26]", () => {
+    const { env } = readonlyEnvelope("envtest");
+    expect(typeof env.reason).toBe("string");
+    expect((env.reason as string).length).toBeGreaterThan(0);
+  });
+
+  test("failure envelope detail field is non-empty user-facing prose [.sh T27]", () => {
+    const { env } = readonlyEnvelope("envtest");
+    expect(typeof env.detail).toBe("string");
+    expect((env.detail as string).length).toBeGreaterThan(5);
+  });
+});
+
+describe("t77 — complete --merge", () => {
+  test("complete --merge without --slug exits 1 [.sh T14]", () => {
+    const proj = track(setupV7Project());
+    const r = runBolt([
+      "complete", "--name", "Foo", "--batch", "1", "--merge",
+      "--project-dir", proj,
+    ]);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("--merge requires --slug");
+  });
+
+  test("complete --merge round-trip exits 0 [.sh T15]", () => {
+    const proj = track(setupV7Project("round"));
+    const start = runBolt([
+      "start", "--name", "Round", "--batch", "1", "--worktree",
+      "--slug", "round", "--project-dir", proj,
+    ]);
+    expect(start.status).toBe(0);
+    const r = runBolt([
+      "complete", "--name", "Round", "--batch", "1", "--merge",
+      "--slug", "round", "--project-dir", proj,
+    ]);
+    expect(r.status).toBe(0);
+  });
+
+  test("stdout reports merged:[STATE_MERGED,AUDIT_MERGED,RUNTIME_GRAPH_MERGED] [.sh T16]", () => {
+    const proj = track(setupV7Project("round"));
+    runBolt([
+      "start", "--name", "Round", "--batch", "1", "--worktree",
+      "--slug", "round", "--project-dir", proj,
+    ]);
+    const r = runBolt([
+      "complete", "--name", "Round", "--batch", "1", "--merge",
+      "--slug", "round", "--project-dir", proj,
+    ]);
+    expect(r.out).toContain(
+      '"merged":["STATE_MERGED","AUDIT_MERGED","RUNTIME_GRAPH_MERGED"]',
+    );
+    const parsed = JSON.parse(r.out.trim());
+    expect(parsed.merged).toEqual([
+      "STATE_MERGED", "AUDIT_MERGED", "RUNTIME_GRAPH_MERGED",
+    ]);
+  });
+
+  test("merge removes the slug from main Bolt Refs [.sh T17]", () => {
+    const proj = track(setupV7Project("round"));
+    runBolt([
+      "start", "--name", "Round", "--batch", "1", "--worktree",
+      "--slug", "round", "--project-dir", proj,
+    ]);
+    runBolt([
+      "complete", "--name", "Round", "--batch", "1", "--merge",
+      "--slug", "round", "--project-dir", proj,
+    ]);
+    const refsLine =
+      readFileSync(statePath(proj), "utf-8")
+        .split("\n")
+        .find((l) => l.includes("Bolt Refs")) ?? "";
+    expect(refsLine).not.toContain("round");
+  });
+});
+
+describe("t77 — abort", () => {
+  test("abort without --slug exits 1 [.sh T18]", () => {
+    const proj = track(setupV7Project());
+    const r = runBolt([
+      "abort", "--name", "Foo", "--reason", "test", "--project-dir", proj,
+    ]);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("Missing --slug");
+  });
+
+  test("abort without --reason exits 1 [.sh T19]", () => {
+    const proj = track(setupV7Project());
+    const r = runBolt([
+      "abort", "--name", "Foo", "--slug", "foo", "--project-dir", proj,
+    ]);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("Missing --reason");
+  });
+
+  test("abort emits BOLT_FAILED (no new event type) [.sh T20]", () => {
+    const proj = track(setupV7Project());
+    runBolt([
+      "abort", "--name", "Foo", "--slug", "foo",
+      "--reason", "user changed mind", "--project-dir", proj,
+    ]);
+    const audit = readAudit(proj);
+    expect(
+      audit.split("\n").some((l) => l === "**Event**: BOLT_FAILED"),
+    ).toBe(true);
+  });
+
+  test("abort BOLT_FAILED carries Reason: aborted [.sh T21]", () => {
+    const proj = track(setupV7Project());
+    runBolt([
+      "abort", "--name", "Foo", "--slug", "foo",
+      "--reason", "user changed mind", "--project-dir", proj,
+    ]);
+    const audit = readAudit(proj);
+    expect(audit.includes("**Reason**: aborted")).toBe(true);
+  });
+
+  test("abort default reports discarded:false with null parked_ref [.sh T22]", () => {
+    const proj = track(setupV7Project("preserved"));
+    const r = runBolt([
+      "abort", "--name", "Preserved", "--slug", "preserved",
+      "--reason", "preserve test", "--project-dir", proj,
+    ]);
+    expect(r.status, r.out).toBe(0);
+    const parsed = JSON.parse(r.out.trim());
+    expect(parsed).toEqual({
+      emitted: "BOLT_FAILED",
+      reason: "aborted",
+      abort_reason: "preserve test",
+      failed_bolt: "Preserved",
+      slug: "preserved",
+      discarded: false,
+      parked_ref: null,
+    });
+  });
+
+  test("abort --discard with nothing to park omits recovery metadata", () => {
+    const proj = track(setupV7Project());
+    const r = runBolt([
+      "abort", "--name", "Already Discarded", "--slug", "already-discarded",
+      "--reason", "nothing left to park", "--discard", "--project-dir", proj,
+    ]);
+    expect(r.status, r.out).toBe(0);
+    expect(JSON.parse(r.out)).toEqual({
+      emitted: "BOLT_FAILED",
+      reason: "aborted",
+      abort_reason: "nothing left to park",
+      failed_bolt: "Already Discarded",
+      slug: "already-discarded",
+      discarded: true,
+      parked_ref: null,
+    });
+  });
+
+  for (const fixture of [
+    { name: "root park", stamp: "20260918T123456Z", repo: null, commit: "a".repeat(40) },
+    { name: "sibling park", stamp: "20260918T123456Z", repo: "api", commit: "a".repeat(40) },
+    { name: "later same-slug park", stamp: "20260918T123456Z-10", repo: null, commit: "b".repeat(40) },
+    { name: "branch-tip park", stamp: "20260918T123457Z", repo: null, commit: "c".repeat(40) },
+    { name: "evidence-only park", stamp: "20260918T123458Z", repo: null, commit: "-" },
+    { name: "impossible calendar stamp", stamp: "20260230T123456Z", repo: null, commit: "-", invalid: true },
+    { name: "invalid collision suffix", stamp: "20260918T123456Z-1", repo: null, commit: "-", invalid: true },
+    { name: "head ref instead of namespace", stamp: "20260918T123456Z/head", repo: null, commit: "-", invalid: true },
+    { name: "invalid display harness", stamp: "20260918T123456Z", repo: null, commit: "-", unsafeHarness: true },
+  ]) {
+    test(`legacy discard ${fixture.name} defers recovery to doctor without guessing a restore operation`, () => {
+      const proj = track(setupV7Project());
+      const slug = "legacy-park";
+      const parkedRef = `refs/aidlc/parked/${slug}/${fixture.stamp}`;
+      const discarded = {
+        emitted: "WORKTREE_DISCARDED",
+        slug,
+        worktree_path: join(proj, fixture.repo ?? ".", ".aidlc", "worktrees", `bolt-${slug}`),
+        reason: "agent-discard",
+        parked_ref: parkedRef,
+        parked_commit: fixture.commit,
+      };
+      const driver = join(proj, "legacy-discard.ts");
+      // Isolate the mixed-version sibling output in a subprocess; the real
+      // abort handler and audit emission run without changing the installation.
+      writeFileSync(driver, `
+import { mock } from "bun:test";
+import * as childProcess from "node:child_process";
+const realSpawn = childProcess.spawnSync;
+mock.module("node:child_process", () => ({
+  ...childProcess,
+  spawnSync(command, args, options) {
+    if (args.some(arg => arg.endsWith("aidlc-worktree.ts")) && args.includes("discard")) {
+      return { status: 0, signal: null, stdout: ${JSON.stringify(JSON.stringify(discarded))}, stderr: "" };
+    }
+    return realSpawn(command, args, options);
+  },
+}));
+// Load the real handler only after intercepting its sibling subprocess boundary.
+const { main } = await import(${JSON.stringify(TOOL)});
+main(process.argv.slice(2));
+`);
+      const result = spawnSync(BUN, [driver, "abort", "--name", "Legacy Park", "--slug", slug,
+        "--reason", "retry after a mixed-version discard", "--discard", "--project-dir", proj], {
+        timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+        cwd: proj, encoding: "utf-8",
+        env: { ...process.env, AIDLC_HARNESS_DIR: fixture.unsafeHarness ? ".claude;echo injected" : ".claude" },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const parked = JSON.parse(result.stdout);
+      expect(parked).not.toHaveProperty("restore_operation");
+      expect(parked).not.toHaveProperty("restore_hint");
+      expect(parked).not.toHaveProperty("restore_hint_error");
+      expect(parked).not.toHaveProperty("parked_excludes");
+      expect(parked).toMatchObject({
+        discarded: true,
+        parked_ref: parkedRef,
+        parked_stamp: fixture.invalid ? null : fixture.stamp,
+        parked_mode: null,
+        parked_repo: null,
+      });
+      expect(parked.recovery_hint).toMatch(/run .*doctor.*list set-aside attempts.*exact restore commands/i);
+      expect(parked.recovery_hint).not.toContain("echo injected");
+      expect(readAudit(proj)).toContain("**Reason**: aborted");
+    });
+  }
+
+  test("abort keeps executable recovery argv when the harness directory contains shell metacharacters", () => {
+    const proj = track(setupV7Project());
+    const slug = "unsafe-harness";
+    const saved = "parked source survives an invalid display harness\n";
+    writeFileSync(join(proj, "saved.txt"), saved);
+    for (const args of [
+      ["init", "-q"],
+      ["add", "saved.txt"],
+      ["-c", "user.name=Recovery fixture", "-c", "user.email=recovery@example.test",
+        "-c", "commit.gpgsign=false", "commit", "-qm", "saved source"],
+      ["branch", boltName(fixtureIntentId8(proj), slug)],
+    ]) {
+      const result = spawnSync("git", args, { timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), cwd: proj, encoding: "utf-8" });
+      expect(result.status, result.stderr).toBe(0);
+    }
+    // An intent-scoped Bolt is only discard's to park when this intent recorded
+    // creating it; model the checkout having vanished after an audit-first create.
+    const name = boltName(fixtureIntentId8(proj), slug);
+    appendAuditEntry("WORKTREE_CREATED", {
+      "Bolt slug": slug,
+      "Worktree path": `.aidlc/worktrees/${name}`,
+      "Branch name": name,
+      "Base branch": "main",
+      "Base commit": spawnSync("git", ["rev-parse", "HEAD"], { timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), cwd: proj, encoding: "utf-8" }).stdout.trim(),
+      Repo: "-",
+      "Intent record": `aidlc/spaces/${DEFAULT_SPACE}/intents/${DEFAULT_RECORD_DIR}`,
+    }, proj, DEFAULT_RECORD_DIR, DEFAULT_SPACE);
+    const env = { ...process.env, AIDLC_HARNESS_DIR: ".claude;echo injected" };
+    const aborted = spawnSync(BUN, [TOOL, "abort", "--name", "Unsafe Harness", "--slug", slug,
+      "--reason", "retry safely", "--discard", "--project-dir", proj], {
+      timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+      cwd: proj, encoding: "utf-8", env,
+    });
+    expect(aborted.status, aborted.stderr).toBe(0);
+    const parked = JSON.parse(aborted.stdout);
+    expect(parked).not.toHaveProperty("restore_hint");
+    expect(parked.restore_hint_error).toContain("Invalid recovery harness directory");
+    expect(parked.restore_operation).toEqual({
+      route: "worktree",
+      args: ["restore", "--slug", slug, "--parked", parked.parked_stamp, "--repo", ".", "--intent", DEFAULT_RECORD_DIR, "--space", DEFAULT_SPACE],
+    });
+    const restored = spawnSync(BUN, [join(AIDLC_SRC, "tools", "aidlc.ts"),
+      "engine", parked.restore_operation.route, ...parked.restore_operation.args,
+      "--project-dir", proj], { timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), cwd: proj, encoding: "utf-8", env });
+    expect(restored.status, restored.stderr).toBe(0);
+    const recovery = JSON.parse(restored.stdout);
+    expect(recovery.parked_ref).toBe(parked.parked_ref);
+    expect(readFileSync(join(recovery.worktree_path, "saved.txt"), "utf-8")).toBe(saved);
+  }, NATIVE_MULTI_WORKTREE_CASE_TIMEOUT_MS);
+
+  test("default abort (no --discard) preserves the worktree directory [.sh T28]", () => {
+    const proj = track(setupV7Project("exp-pres"));
+    const wtDir = worktreePath(proj, fixtureIntentId8(proj), "exp-pres");
+    mkdirSync(wtDir, { recursive: true });
+    writeFileSync(join(wtDir, "file.txt"), "marker");
+    const aborted = runBolt([
+      "abort", "--name", "Pres", "--slug", "exp-pres",
+      "--reason", "default-pres test", "--project-dir", proj,
+    ]);
+    expect(aborted.status, aborted.out).toBe(0);
+    const parsed = JSON.parse(aborted.out);
+    expect(parsed.reason).toBe("aborted");
+    expect(parsed.abort_reason).toBe("default-pres test");
+    expect(parsed).not.toHaveProperty("restore_hint");
+    expect(existsSync(wtDir)).toBe(true);
+  });
+});
+
+describe("t77 — fail --slug (milestone 12 halt-and-ask correlation)", () => {
+  test("fail --slug records the Bolt slug audit field [.sh T23]", () => {
+    const proj = track(setupV7Project());
+    runBolt([
+      "fail", "--name", "Failed", "--slug", "fail-slug",
+      "--error", "broke", "--project-dir", proj,
+    ]);
+    const audit = readAudit(proj);
+    expect(audit.includes("**Bolt slug**: fail-slug")).toBe(true);
+  });
+});
+
+describe("t77 — regression guard: no-flag paths unchanged", () => {
+  test("regression: start without --worktree leaves Bolt Refs unchanged [.sh T24]", () => {
+    const proj = track(setupV7Project());
+    const refsLine = (s: string): string =>
+      readFileSync(statePath(s), "utf-8")
+        .split("\n")
+        .find((l) => l.includes("Bolt Refs")) ?? "";
+    const before = refsLine(proj);
+    const r = runBolt([
+      "start", "--name", "Plain", "--batch", "1", "--project-dir", proj,
+    ]);
+    expect(r.status).toBe(0);
+    expect(refsLine(proj)).toBe(before);
+  });
+});
