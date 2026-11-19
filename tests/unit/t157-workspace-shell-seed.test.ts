@@ -172,6 +172,13 @@ describe("t157 seeded workspace shell + re-rooted .gitignore (SEED)", () => {
         expect(rule).toContain("alwaysApply: true");
         expect(rule).toContain("aidlc/active-memory/org.md");
         expect(existsSync(harness.onboardingDist)).toBe(true);
+      } else if (harness.capabilities.memoryInclude === "devin-rule") {
+        // Devin: the always-on rule lists the method files as plain paths
+        // (Devin rules expand no @-imports); AGENTS.md is the auto-read rules file.
+        const rule = readFileSync(join(harness.engineRoot, "rules", "aidlc-method.md"), "utf-8");
+        expect(rule).toContain("trigger: always_on");
+        expect(rule).toContain("aidlc/active-memory/org.md");
+        expect(existsSync(harness.onboardingDist)).toBe(true);
       } else {
         // opencode: the instructions glob in the project-root opencode.json is
         // the native include surface; AGENTS.md is the auto-read rules file.

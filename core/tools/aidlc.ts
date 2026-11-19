@@ -1356,6 +1356,7 @@ export function resolveHookPath(
         ".kiro",
         ".codex",
         ".cursor",
+        ".devin",
       ].filter((value, index, values): value is string =>
         typeof value === "string" && value.length > 0 && values.indexOf(value) === index
       );

@@ -445,6 +445,11 @@ describe("t266 conversation-language rule layer", () => {
           surface = join(harness.engineRoot, "rules", "aidlc.mdc");
           required = `- ${COPY_DIR}/org.md`;
           break;
+        case "devin-rule":
+          // Devin: an always-on rule naming the method files by path.
+          surface = join(harness.engineRoot, "rules", "aidlc-method.md");
+          required = `- ${COPY_DIR}/org.md`;
+          break;
         case "kiro-steering":
           // The IDE's real surface: an always-included steering file that
           // carries the memory text itself (Kiro IDE does not expand
@@ -490,6 +495,12 @@ describe("t266 conversation-language rule layer", () => {
         expect(
           /^---\n(?:.*\n)*?alwaysApply:\s*true\n(?:.*\n)*?---/.test(body),
           `${harness.name}'s standing rule declares alwaysApply: true`,
+        ).toBe(true);
+      }
+      if (include === "devin-rule") {
+        expect(
+          /^---\n(?:.*\n)*?trigger:\s*always_on\n(?:.*\n)*?---/.test(body),
+          `${harness.name}'s standing rule declares trigger: always_on`,
         ).toBe(true);
       }
 
