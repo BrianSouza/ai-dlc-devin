@@ -733,7 +733,7 @@ export const PHASE_NUMBERS: Record<string, Phase> = {
 // dev-repo CWD rung, where more than one harness dir can coexist and the Claude
 // tree is canonical (".claude" must win). A real single-harness install never
 // reaches the probe; it resolves by script path.
-export const KNOWN_HARNESS_DIRS = [".claude", ".kiro", ".codex", ".aidlc", ".cursor"] as const;
+export const KNOWN_HARNESS_DIRS = [".claude", ".kiro", ".codex", ".aidlc", ".cursor", ".devin"] as const;
 
 // True for a plausible harness dir name: a dot-prefixed segment, e.g. ".claude"
 // / ".kiro" / ".gemini". Guards the script-path derivation so an unexpected
@@ -4719,7 +4719,7 @@ export function aidlcRootIntegrations(dir: string): Array<{ path: string; policy
 // installed harness writes into, left out whole because none of them is
 // application code (a .gitignore edit that adds or drops files still moves the
 // fingerprint through those files); and AI-DLC's root settings files.
-const CODEKB_INSTALL_DIRS = ["aidlc", ".aidlc", ".claude", ".codex", ".cursor", ".kiro", ".opencode"];
+const CODEKB_INSTALL_DIRS = ["aidlc", ".aidlc", ".claude", ".codex", ".cursor", ".devin", ".kiro", ".opencode"];
 const CODEKB_INSTALL_ENTRY_DIRS = [".github/agents", ".github/hooks", ".github/skills", ".agents/skills"];
 export function codekbFingerprintExcludes(projectDir: string, sourceDir: string): string[] {
   if (sourceDir !== projectDir) return [];

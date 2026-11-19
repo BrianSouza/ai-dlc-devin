@@ -29,6 +29,7 @@ const TOOL_HEADING: Record<string, string> = {
   "kiro-ide": "Kiro IDE",
   codex: "Codex CLI",
   cursor: "Cursor",
+  devin: "Devin CLI",
   opencode: "opencode",
   copilot: "GitHub Copilot",
 };
