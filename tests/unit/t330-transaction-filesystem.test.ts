@@ -1,0 +1,747 @@
+// covers: function:assertTransactionFilesystem, function:executePlan,
+//   function:processGeneration, function:processStartedAtMs
+// Real local IO with selected mount operations unavailable; this does not
+// certify the atomicity/durability of S3 drivers or exercise a live S3 mount.
+// The project lock is one owner-stamped folder on every storage: nothing here
+// needs a hard link, and a transaction no longer repeats the storage check the
+// first-run wizard runs.
+import { afterAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+  realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { processGeneration, processStartedAtMs } from "../../core/tools/aidlc-lib.ts";
+import { waitForBarrierLine } from "../harness/barrier-file.ts";
+
+const REPO_ROOT = join(import.meta.dir, "..", "..");
+const TRANSACTION = pathToFileURL(join(REPO_ROOT, "core/tools/aidlc-transaction.ts")).href;
+const LOCK = ".aidlc-transaction.lock";
+const temporary: string[] = [];
+afterAll(() => {
+  for (const path of temporary) rmSync(path, { recursive: true, force: true });
+});
+
+function project(): string {
+  const container = realpathSync(mkdtempSync(join(tmpdir(), "aidlc-t330-")));
+  temporary.push(container);
+  const root = join(container, "project");
+  mkdirSync(root);
+  writeFileSync(join(root, "existing.txt"), "original\n", { mode: 0o640 });
+  writeFileSync(join(root, "remove.txt"), "keep until commit\n");
+  return root;
+}
+
+function expectProject(root: string, committed = false, extra: string[] = []): void {
+  expect(readFileSync(join(root, "existing.txt"), "utf-8"))
+    .toBe(committed ? "updated\n" : "original\n");
+  const second = committed ? "new.txt" : "remove.txt";
+  expect(readFileSync(join(root, second), "utf-8"))
+    .toBe(committed ? "created\n" : "keep until commit\n");
+  expect(readdirSync(root).sort()).toEqual(["existing.txt", second, ...extra].sort());
+  if (process.platform !== "win32") {
+    expect(statSync(join(root, "existing.txt")).mode & 0o777).toBe(committed ? 0o600 : 0o640);
+  }
+}
+
+type Fault = "append" | "append-lost" | "read" | "identity" | "exclusive"
+  | "file-rename" | "directory-rename" | "chmod" | "workflow" | "lock-mkdir"
+  | "directory-fsync" | "file-fsync" | "commit-fsync" | "commit-rename" | "owner-read";
+type Options = {
+  fault?: Fault; code?: string; once?: boolean; mode?: "probe" | "apply"; retaken?: boolean; noLinks?: boolean;
+  failAfter?: number; closeError?: boolean; cleanupError?: boolean;
+  replaceOwner?: boolean; requestedRoot?: string; contender?: boolean; releaseRetry?: boolean;
+  pause?: "acquire" | "locked" | "release"; letGo?: "lock" | "owner" | "read";
+};
+type Owner = {
+  schemaVersion: number; pid: number; host: string; machine?: string; boot?: string;
+  token: string; staging: string; processGeneration?: string;
+};
+type Observation = {
+  error: null | {
+    name: string; message: string; root?: string; operation?: string; code?: string;
+    remediation?: string; filesystem: boolean; lock: boolean; causeInjected: boolean;
+    sameInjected: boolean; causes?: string[];
+  };
+  owner?: Owner; replacement?: string;
+  faultHits: number; linkHits: number; probes: string[]; gates: string[];
+  publicationCopies: number; pendingGate?: boolean;
+  letGo: boolean; stderr: string;
+};
+function childEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.AIDLC_ROUTE_MUTATION_SCOPE;
+  return env;
+}
+
+// Isolate mocks from the runner's module cache. Every wrapper delegates to real
+// IO except its selected fault, scoped to the project mount, so the dedicated
+// local tmpdir gate is never faulted.
+function childSource(root: string, options: Options): string {
+  return `
+    import { mock } from "bun:test";
+    import { basename, dirname, join, sep } from "node:path";
+    const fs = { ...await import("node:fs") };
+    const root = ${JSON.stringify(root)}, cfg = ${JSON.stringify(options)};
+    const lock = join(root, ${JSON.stringify(LOCK)});
+    const onMount = p => typeof p === "string" && (p === root || p.startsWith(root + sep));
+    const inProbe = p => onMount(p) && p.split(sep).some(s => s.startsWith(".aidlc-lock-probe-"));
+    const injected = Object.assign(new Error("simulated " + cfg.fault + " failure"),
+      { code: cfg.code ?? "EOPNOTSUPP" });
+    const closeError = Object.assign(new Error("simulated close failure"), { code: "EIO" });
+    const cleanupError = Object.assign(new Error("simulated cleanup failure"), { code: "EACCES" });
+    const out = { error: null, faultHits: 0, linkHits: 0, probes: [], gates: [],
+      publicationCopies: 0, letGo: false };
+    const fds = new Map();
+    let paused = false, held = false, lockMakes = 0;
+    const fail = () => { out.faultHits++; throw injected; };
+    // A holder outside the local gate lets the lock go while the waiter whose
+    // attempt found it held is still looking at it.
+    function found(p, attempt) {
+      try {
+        return attempt();
+      } catch (e) {
+        if (p === lock && e.code === "EEXIST") held = true;
+        throw e;
+      }
+    }
+    function letGo(moment) {
+      if (cfg.letGo !== moment || !held || out.letGo) return false;
+      out.letGo = true;
+      fs.rmSync(lock, { recursive: true, force: true });
+      return true;
+    }
+    function pause(phase) {
+      if (cfg.pause !== phase || paused) return;
+      paused = true;
+      fs.writeFileSync(join(dirname(root), "ready"), phase + "\\n");
+      const deadline = performance.now() + 20000;
+      while (!fs.existsSync(join(dirname(root), "continue"))) {
+        if (performance.now() > deadline) throw new Error("holder rendezvous timed out");
+        Bun.sleepSync(10);
+      }
+    }
+    mock.module("node:fs", () => ({
+      ...fs,
+      mkdtempSync(p, ...args) {
+        const result = fs.mkdtempSync(p, ...args);
+        if (inProbe(result)) out.probes.push(result);
+        return result;
+      },
+      // Storage without hard links (exFAT): every link on the mount is refused.
+      linkSync(source, destination) {
+        if (cfg.noLinks && (onMount(source) || onMount(destination))) {
+          out.linkHits++;
+          throw Object.assign(new Error("simulated link failure"), { code: "EPERM" });
+        }
+        return fs.linkSync(source, destination);
+      },
+      lstatSync(p, ...args) {
+        if (p === join(lock, "owner.json")) letGo("owner");
+        const stat = fs.lstatSync(p, ...args);
+        if (p === lock) letGo("lock");
+        return stat;
+      },
+      mkdirSync(p, ...args) {
+        if (!onMount(p) && /^\\.aidlc-.*\\.lock$/.test(basename(p)))
+          out.gates.push(p);
+        if (onMount(p) && cfg.fault === "lock-mkdir" && basename(p) === ${JSON.stringify(LOCK)}) fail();
+        // A third command takes the lock between this one clearing a dead
+        // holder's and taking it.
+        if (p === lock && cfg.retaken && ++lockMakes === 2) fs.mkdirSync(lock);
+        // The workflow lock is built under a private candidate name and renamed into place.
+        if (inProbe(p) && cfg.fault === "workflow" && basename(p).startsWith("workflow-lock.candidate.")) fail();
+        return found(p, () => fs.mkdirSync(p, ...args));
+      },
+      openSync(p, flags, ...args) {
+        if (p === join(lock, "owner.json")) pause("acquire");
+        if (inProbe(p) && cfg.fault === "append" && flags === "a+") fail();
+        if (inProbe(p) && cfg.fault === "exclusive" && flags === "wx" && fs.existsSync(p)) {
+          out.faultHits++;
+          flags = "w";
+        }
+        const fd = fs.openSync(p, flags, ...args);
+        fds.set(fd, { path: p, flags });
+        return fd;
+      },
+      writeSync(fd, ...args) {
+        if (inProbe(fds.get(fd)?.path) && cfg.fault === "append-lost" && fds.get(fd)?.flags === "a+") {
+          out.faultHits++;
+          return Buffer.byteLength(args[0]);
+        }
+        return fs.writeSync(fd, ...args);
+      },
+      fstatSync(fd, ...args) {
+        const stat = fs.fstatSync(fd, ...args);
+        if (inProbe(fds.get(fd)?.path) && cfg.fault === "identity" && fds.get(fd)?.flags === "a+") {
+          out.faultHits++;
+          // Windows file IDs exceed 2^53, where ino + 1 rounds back to ino, so
+          // move the device too: the probe compares both.
+          return { ...stat, dev: stat.dev + 1, ino: stat.ino + 1 };
+        }
+        return stat;
+      },
+      fsyncSync(fd) {
+        const p = fds.get(fd)?.path;
+        if (onMount(p)) {
+          const directory = fs.fstatSync(fd).isDirectory();
+          if (cfg.fault === "directory-fsync" && directory) fail();
+          if (cfg.fault === "file-fsync" && inProbe(p) && basename(p) === "candidate") fail();
+          if (cfg.fault === "commit-fsync" && !inProbe(p) && p.includes(sep + "candidates" + sep)) fail();
+        }
+        return fs.fsyncSync(fd);
+      },
+      readFileSync(p, ...args) {
+        if (cfg.fault === "read" && inProbe(p) && basename(p) === "candidate") fail();
+        if (p === lock || p === join(lock, "owner.json")) {
+          // Windows answers a read of a lock its holder is deleting with EPERM.
+          if (letGo("read")) throw Object.assign(new Error("simulated read of a lock being deleted"), { code: "EPERM" });
+          if (cfg.fault === "owner-read" && !(cfg.once && out.faultHits > 0)) fail();
+        }
+        return fs.readFileSync(p, ...args);
+      },
+      renameSync(source, destination) {
+        // A local gate lock is published by renaming its stamped candidate into place.
+        if (!onMount(destination) && /^\\.aidlc-.*\\.lock$/.test(basename(destination)))
+          out.gates.push(destination);
+        if (inProbe(source) && fs.existsSync(source)) {
+          if (cfg.fault === "directory-rename" && fs.lstatSync(source).isDirectory()) fail();
+          if (cfg.fault === "file-rename" && !fs.lstatSync(source).isDirectory()) fail();
+        }
+        if (cfg.fault === "commit-rename" && destination === join(root, "new.txt")) fail();
+        return fs.renameSync(source, destination);
+      },
+      chmodSync(p, ...args) {
+        if (cfg.fault === "chmod" && inProbe(p)) fail();
+        return fs.chmodSync(p, ...args);
+      },
+      closeSync(fd) {
+        const p = fds.get(fd)?.path;
+        const result = fs.closeSync(fd);
+        fds.delete(fd);
+        if (cfg.closeError && inProbe(p) && basename(p) === "candidate") throw closeError;
+        return result;
+      },
+      rmSync(p, ...args) {
+        if (p === lock) pause("release");
+        if (cfg.cleanupError && onMount(p) && basename(p).startsWith(".aidlc-lock-probe-")) throw cleanupError;
+        return fs.rmSync(p, ...args);
+      },
+      cpSync(source, destination, ...args) {
+        if (dirname(destination) === root) out.publicationCopies++;
+        return fs.cpSync(source, destination, ...args);
+      },
+      copyFileSync(source, destination, ...args) {
+        if (dirname(destination) === root) out.publicationCopies++;
+        return fs.copyFileSync(source, destination, ...args);
+      },
+    }));
+    const tx = await import(${JSON.stringify(TRANSACTION)});
+    const lib = cfg.releaseRetry ? await import(new URL("./aidlc-lib.ts", ${JSON.stringify(TRANSACTION)}).href) : null;
+    lib?._setAuditLockFaultHooksForTests({ failReleaseRename: () => { out.faultHits++; return true; } });
+    const requested = cfg.requestedRoot ?? root;
+    try {
+      if (cfg.mode === "probe") tx.assertTransactionFilesystem(requested);
+      else tx.executePlan({ schemaVersion: 1, root: requested, operations: [
+        tx.writeOperation("existing.txt", cfg.contender ? "contender\\n" : "updated\\n",
+          tx.transactionState(join(root, "existing.txt")), 0o600),
+        ...(cfg.contender ? [] : [
+          tx.writeOperation("new.txt", "created\\n", "absent"),
+          { kind: "remove", path: "remove.txt", expected: tx.transactionState(join(root, "remove.txt")) },
+        ]),
+      ] }, {
+        failAfter: cfg.failAfter,
+        validateLocked() {
+          out.owner = JSON.parse(fs.readFileSync(join(lock, "owner.json"), "utf8"));
+          pause("locked");
+        },
+        validateCandidates() {
+          if (!cfg.replaceOwner) return;
+          fs.rmSync(lock, { recursive: true, force: true });
+          fs.mkdirSync(lock);
+          out.replacement = JSON.stringify({ ...out.owner, token: "replacement-owner" });
+          fs.writeFileSync(join(lock, "owner.json"), out.replacement);
+          throw new Error("replacement installed");
+        },
+      });
+      if (cfg.releaseRetry) {
+        out.pendingGate = out.gates.some(p => fs.existsSync(p));
+        lib._setAuditLockFaultHooksForTests(null);
+        tx.executePlan({ schemaVersion: 1, root: requested,
+          operations: [tx.writeOperation("second.txt", "second commit\\n", "absent")] });
+      }
+    } catch (e) {
+      out.error = { name: e.name, message: e.message, root: e.root, operation: e.operation,
+        code: e.code, remediation: e.remediation, filesystem: e instanceof tx.TransactionFilesystemError,
+        lock: e instanceof tx.TransactionLockError, causeInjected: e.cause === injected,
+        sameInjected: e === injected, causes: (e.errors ?? e.cause?.errors)?.map(c => c?.message) };
+    } finally {
+      lib?._setAuditLockFaultHooksForTests(null);
+    }
+    process.stdout.write(JSON.stringify(out));
+  `;
+}
+
+function observe(root: string, options: Options = {}): Observation {
+  const result = spawnSync(process.execPath, ["--eval", childSource(root, options)], {
+    cwd: REPO_ROOT, env: childEnv(), encoding: "utf-8", timeout: 30_000,
+  });
+  expect(result.error, result.stderr).toBeUndefined();
+  expect(result.status, result.stdout + result.stderr).toBe(0);
+  const out = { ...JSON.parse(result.stdout), stderr: result.stderr } as Observation;
+  if (!options.contender) {
+    for (const gate of out.gates) expect(existsSync(gate), gate).toBe(false);
+  }
+  if (!options.cleanupError) {
+    for (const probe of out.probes) expect(existsSync(probe), probe).toBe(false);
+  }
+  return out;
+}
+
+function expectFilesystem(out: Observation, root: string, code: string, operation: RegExp): void {
+  expect(out.error).toMatchObject({
+    name: "TransactionFilesystemError", root, code, filesystem: true, lock: false,
+  });
+  expect(out.error?.operation).toMatch(operation);
+  expect(out.error?.message).toContain(root);
+  expect(out.error?.message).toContain(code);
+  expect(out.error?.remediation).toMatch(/mount|local storage/i);
+}
+
+describe("t330 transaction filesystem contract", () => {
+  // exFAT and other storage without hard links: everything works on the one
+  // lock, and a transaction never repeats the wizard's storage check.
+  test("storage that refuses hard links supports probe, update/create/remove, rollback and cleanup", () => {
+    const root = project();
+    const probed = observe(root, { mode: "probe", noLinks: true });
+    expect(probed.error).toBeNull();
+    expect(probed.linkHits).toBe(0);
+    expectProject(root);
+    const rolledBack = observe(root, { failAfter: 3, noLinks: true });
+    expect(rolledBack.error?.message).toContain("injected transaction failure after operation 3");
+    expectProject(root);
+    const applied = observe(root, { noLinks: true });
+    expect(applied.error).toBeNull();
+    expect(applied.linkHits).toBe(0);
+    expect(applied.owner).toMatchObject({ schemaVersion: 1, pid: expect.any(Number), host: expect.any(String),
+      machine: expect.any(String), token: expect.any(String), staging: expect.stringMatching(/^\.aidlc-txn-/) });
+    expect(applied.probes).toHaveLength(0);
+    expectProject(root, true);
+  });
+
+  for (const [fault, operation, code] of [
+    ["append", /append/, "EOPNOTSUPP"], ["append-lost", /append/, "UNKNOWN"],
+    ["read", /append/, "EIO"], ["identity", /descriptor/, "UNKNOWN"],
+    ["exclusive", /exclusive/, "UNKNOWN"], ["file-rename", /file replacement/, "EXDEV"],
+    ["directory-rename", /directory rename/, "EOPNOTSUPP"],
+    ["workflow", /workflow lock/, "UNKNOWN"],
+    ...(process.platform === "win32" ? [] : [["chmod", /permissions/, "EPERM"]]),
+  ] as [Fault, RegExp, string][]) {
+    test(`the storage check rejects ${fault} before any project mutation`, () => {
+      const root = project();
+      const out = observe(root, { mode: "probe", fault, code });
+      expect(out.faultHits).toBeGreaterThan(0);
+      expectFilesystem(out, root, code, operation);
+      expectProject(root);
+    });
+  }
+
+  for (const mode of ["probe", "apply"] as const) {
+    test(`${mode} names the project when its lock cannot be made`, () => {
+      const root = project();
+      const out = observe(root, { mode, fault: "lock-mkdir", code: "EACCES" });
+      expect(out.error).toMatchObject({
+        name: "TransactionLockError", code: "EACCES", filesystem: true, lock: true,
+      });
+      expect(out.error?.message).toMatch(/^Cannot create an AI-DLC transaction lock in .+ \(EACCES\)\.$/);
+      expect(out.error?.message).not.toMatch(/hard.?link/i);
+      expectProject(root);
+    });
+  }
+
+  for (const code of ["ENOSYS", "EOPNOTSUPP"]) {
+    test(`${code} directory fsync is tolerated but file fsync is required`, () => {
+      const root = project();
+      const probe = observe(root, { mode: "probe", fault: "file-fsync", code });
+      expectFilesystem(probe, root, code, /synchronization/);
+      expectProject(root);
+      const stage = observe(root, { fault: "commit-fsync", code });
+      expect(stage.error).toMatchObject({ code, sameInjected: true });
+      expectProject(root);
+      const dirs = observe(root, { fault: "directory-fsync", code });
+      expect(dirs.faultHits).toBeGreaterThan(0);
+      expect(dirs.error).toBeNull();
+      expectProject(root, true);
+    });
+  }
+
+  test("a failed publication rename rolls back earlier changes without copy/delete publication", () => {
+    const root = project();
+    const out = observe(root, { fault: "commit-rename", code: "EXDEV" });
+    expect(out.error).toMatchObject({ code: "EXDEV", sameInjected: true });
+    expect(out.publicationCopies).toBe(0);
+    expectProject(root);
+  });
+
+  test("probe cleanup survives close failure and retains the original diagnostic", () => {
+    const root = project();
+    const out = observe(root, { mode: "probe", fault: "file-fsync", code: "ENOSPC", closeError: true });
+    expectFilesystem(out, root, "ENOSPC", /synchronization/);
+    expect(out.error?.causeInjected).toBe(true);
+    expectProject(root);
+    const close = observe(root, { mode: "probe", closeError: true });
+    expectFilesystem(close, root, "EIO", /synchronization/);
+    expectProject(root);
+  });
+
+  test("failed probe cleanup reports retained evidence and the primary diagnostic together", () => {
+    const root = project();
+    const out = observe(root, { mode: "probe", fault: "file-fsync", code: "ENOSPC",
+      closeError: true, cleanupError: true });
+    // The filesystem error keeps its type, and so its storage fix, with the
+    // cleanup failures attached as its cause.
+    expect(out.error?.name).toBe("TransactionFilesystemError");
+    expect(out.error?.remediation).toBeDefined();
+    expect(out.error?.message).toContain(out.probes[0]);
+    expect(out.error?.message).toContain("ENOSPC");
+    expect(out.error?.causes).toEqual(expect.arrayContaining(["simulated close failure", "simulated cleanup failure"]));
+    expect(existsSync(out.probes[0])).toBe(true);
+    rmSync(out.probes[0], { recursive: true, force: true });
+    expectProject(root);
+  });
+
+  test("a missing project is probed in its ancestor and diagnostics name the requested root", () => {
+    const root = project(), requestedRoot = join(root, "missing", "nested");
+    expect(observe(root, { mode: "probe", requestedRoot }).error).toBeNull();
+    const out = observe(root, { mode: "probe", fault: "read", code: "EIO", requestedRoot });
+    expectFilesystem(out, requestedRoot, "EIO", /append/);
+    expectProject(root);
+  });
+});
+
+const BUSY = "wait for it to finish, then run this command again.";
+const busyAt = (root: string) => `another AI-DLC command is still working in ${root}.`;
+
+describe("t330 lock ownership", () => {
+  test("a pending local-gate release is recovered before another transaction in the same process", () => {
+    const root = project(), out = observe(root, { releaseRetry: true });
+    expect(out.faultHits).toBeGreaterThan(0);
+    expect(out.pendingGate).toBe(true);
+    expect(out.error).toBeNull();
+    expect(out.probes).toHaveLength(0);
+    expect(readFileSync(join(root, "second.txt"), "utf8")).toBe("second commit\n");
+    expectProject(root, true, ["second.txt"]);
+  });
+
+  let deadOwner: Owner;
+  function owner(): Owner {
+    if (!deadOwner) {
+      const root = project();
+      const out = observe(root, { failAfter: 3 });
+      expect(out.error?.message).toContain("injected transaction failure");
+      expectProject(root);
+      deadOwner = out.owner!;
+      expect(() => process.kill(deadOwner.pid, 0)).toThrow();
+      expect(deadOwner.processGeneration).toEqual(expect.any(String));
+    }
+    return { ...deadOwner };
+  }
+  // A live PID holds the lock only while it is still the process that wrote
+  // it: the same generation, or, for an older release's lock that records no
+  // generation, a process that started before the lock was written.
+  const RECLAIMED = new Set(["dead", "reused", "legacy-reused", "other-boot"]);
+  const LONG_AGO = new Date("2001-01-01T00:00:00Z");
+  const CLEARED = "an earlier AI-DLC command stopped before it finished, so its lock was cleared.";
+  const ELSEWHERE = "an AI-DLC command on another computer is working in ";
+  const ELSEWHERE_OR_RESTART = "an AI-DLC command on another computer, or on this one before it restarted, is working in ";
+  // What each lock that is kept says: a holder still working (or still writing
+  // its stamp), another computer's, or a stamp that cannot be read.
+  const KEPT: Record<string, string> = {
+    live: "busy", "legacy-live": "busy", missing: "busy", malformed: "busy",
+    foreign: ELSEWHERE, "foreign-2.11.2": ELSEWHERE_OR_RESTART,
+    "unknown-schema": "unreadable", "no-token": "unreadable", "invalid-pid": "unreadable",
+    "out-of-range-pid": "unreadable",
+  };
+  for (const state of ["live", "dead", "reused", "legacy-live", "legacy-reused", "foreign", "foreign-2.11.2", "other-boot", "missing", "malformed", "unknown-schema", "no-token", "invalid-pid", "out-of-range-pid"]) {
+    test(`directory owner ${state} is reclaimed only with proof of same-computer death`, () => {
+      const root = project(), lock = join(root, LOCK), stamp = owner();
+      if (state === "live") Object.assign(stamp, { pid: process.pid, processGeneration: processGeneration(process.pid) });
+      if (state === "reused") stamp.pid = process.pid;
+      if (state.startsWith("legacy-")) {
+        stamp.pid = process.pid;
+        delete stamp.processGeneration;
+      }
+      if (state.startsWith("foreign") || state === "other-boot") {
+        Object.assign(stamp, { pid: process.pid, processGeneration: processGeneration(process.pid) });
+        stamp.host = `other:${stamp.host}`;
+      }
+      if (state === "foreign") stamp.machine = `other:${stamp.machine}`;
+      // 2.11.2 stamped no machine or boot.
+      if (state === "foreign-2.11.2") {
+        delete stamp.machine;
+        delete stamp.boot;
+      }
+      // The same computer before a restart: its holders died with that boot.
+      if (state === "other-boot") stamp.boot = "another-boot";
+      if (state === "unknown-schema") stamp.schemaVersion = 2;
+      if (state === "no-token") stamp.token = "";
+      if (state === "invalid-pid") stamp.pid = 0;
+      if (state === "out-of-range-pid") stamp.pid = Number.MAX_SAFE_INTEGER;
+      mkdirSync(lock);
+      const raw = state === "malformed" ? "{" : JSON.stringify(stamp);
+      if (state !== "missing") writeFileSync(join(lock, "owner.json"), raw);
+      if (state === "legacy-reused") utimesSync(join(lock, "owner.json"), LONG_AGO, LONG_AGO);
+      const before = statSync(lock);
+      const out = observe(root);
+      if (RECLAIMED.has(state)) {
+        expect(out.error).toBeNull();
+        expect(out.stderr).toContain(CLEARED);
+        expectProject(root, true);
+      } else {
+        expect(out.stderr).not.toContain(CLEARED);
+        const kept = KEPT[state];
+        if (kept === "busy") {
+          expect(out.error).toMatchObject({ name: "TransactionBusyError", message: busyAt(root), remediation: BUSY });
+        } else if (kept === "unreadable") {
+          expect(out.error).toMatchObject({
+            message: `${lock} cannot be read.`,
+            remediation: "if no AI-DLC command is running, delete that folder, then run this command again.",
+          });
+        } else {
+          expect(out.error?.message).toBe(`${kept}${root}${state === "foreign" ? ", or left its lock there." : " or left its lock there."}`);
+          expect(out.error?.remediation).toBe(
+            `wait for it to finish, then run this command again; if none is running there, delete the folder ${lock} first.`,
+          );
+        }
+        expect(out.error?.filesystem).toBe(true);
+        expect(statSync(lock).ino).toBe(before.ino);
+        expect(readdirSync(lock)).toEqual(state === "missing" ? [] : ["owner.json"]);
+        if (state !== "missing") expect(readFileSync(join(lock, "owner.json"), "utf8")).toBe(raw);
+        expectProject(root, false, [LOCK]);
+      }
+    });
+  }
+
+  // A refusal names a step that works: the person deletes the folder it names
+  // and runs the command again.
+  for (const state of ["foreign", "unknown-schema"]) {
+    test(`following the ${state} lock's step lets the command run`, () => {
+      const root = project(), lock = join(root, LOCK), stamp = owner();
+      Object.assign(stamp, { pid: process.pid, host: `other:${stamp.host}`, machine: `other:${stamp.machine}` });
+      if (state === "unknown-schema") stamp.schemaVersion = 2;
+      mkdirSync(lock);
+      writeFileSync(join(lock, "owner.json"), JSON.stringify(stamp));
+      const refused = observe(root);
+      const named = /delete the folder (.+) first\.$/.exec(refused.error?.remediation ?? "")?.[1]
+        ?? /^(.+) cannot be read\.$/.exec(refused.error?.message ?? "")?.[1];
+      expect(named).toBe(lock);
+      rmSync(named!, { recursive: true, force: true });
+      const again = observe(root);
+      expect(again.error).toBeNull();
+      expectProject(root, true);
+    });
+  }
+
+  // A command killed between making the lock folder and finishing its stamp
+  // leaves no owner, an empty one or a cut-off one. Within the grace a live
+  // holder may still be stamping it; past it, the next command clears it.
+  for (const state of ["missing", "empty", "cut-off"]) {
+    test(`directory owner ${state} is cleared once past the grace`, () => {
+      const root = project(), lock = join(root, LOCK);
+      mkdirSync(lock);
+      if (state === "empty") writeFileSync(join(lock, "owner.json"), "");
+      if (state === "cut-off") writeFileSync(join(lock, "owner.json"), '{"schemaVersion":1,"pid":');
+      const fresh = observe(root);
+      expect(fresh.error).toMatchObject({ message: busyAt(root), remediation: BUSY });
+      expect(fresh.stderr).not.toContain(CLEARED);
+      expectProject(root, false, [LOCK]);
+      utimesSync(lock, LONG_AGO, LONG_AGO);
+      const aged = observe(root);
+      expect(aged.error).toBeNull();
+      expect(aged.stderr).toContain(CLEARED);
+      expectProject(root, true);
+    });
+  }
+
+  test("a directory stamp that parses but names no valid owner stays refused past the grace", () => {
+    const root = project(), lock = join(root, LOCK), raw = '{"schemaVersion":1}';
+    mkdirSync(lock);
+    writeFileSync(join(lock, "owner.json"), raw);
+    utimesSync(lock, LONG_AGO, LONG_AGO);
+    const out = observe(root);
+    expect(out.error?.message).toBe(`${lock} cannot be read.`);
+    expect(out.stderr).not.toContain(CLEARED);
+    expect(readFileSync(join(lock, "owner.json"), "utf8")).toBe(raw);
+    expectProject(root, false, [LOCK]);
+  });
+
+  test("a lock another command takes between a dead holder's clearing and this one's is busy", () => {
+    const root = project(), lock = join(root, LOCK);
+    mkdirSync(lock);
+    writeFileSync(join(lock, "owner.json"), JSON.stringify(owner()));
+    const out = observe(root, { retaken: true });
+    expect(out.stderr).toContain(CLEARED);
+    expect(out.error).toMatchObject({ name: "TransactionBusyError", message: busyAt(root), remediation: BUSY });
+    expectProject(root, false, [LOCK]);
+  });
+
+  // 2.11.2 took a file lock by hard link where the storage allowed it; a live
+  // one still holds the project, and a dead one is cleared.
+  test("the storage check and a transaction keep a live 2.11.2 file lock", () => {
+    const root = project(), lock = join(root, LOCK);
+    const raw = JSON.stringify({ pid: process.pid, staging: ".aidlc-txn-live" });
+    writeFileSync(lock, raw);
+    const before = statSync(lock);
+    expect(observe(root, { mode: "probe" }).error).toBeNull();
+    expect(observe(root).error).toMatchObject({ message: busyAt(root), remediation: BUSY });
+    expect(readFileSync(lock, "utf8")).toBe(raw);
+    expect(statSync(lock).ino).toBe(before.ino);
+    expect(statSync(lock).mtimeMs).toBe(before.mtimeMs);
+    expectProject(root, false, [LOCK]);
+  });
+
+  for (const state of ["dead", "live", "reused", "legacy-live", "legacy-reused"]) {
+    test(`2.11.2 file owner ${state} is reclaimed only when its PID no longer runs its holder`, () => {
+      const root = project(), lock = join(root, LOCK), dead = owner();
+      const stamp: Record<string, unknown> = { pid: process.pid, staging: ".aidlc-txn-held" };
+      if (state === "dead") Object.assign(stamp, { pid: dead.pid, processGeneration: dead.processGeneration });
+      if (state === "live") stamp.processGeneration = processGeneration(process.pid);
+      if (state === "reused") stamp.processGeneration = dead.processGeneration;
+      const raw = `${JSON.stringify(stamp)}\n`;
+      writeFileSync(lock, raw);
+      if (state === "legacy-reused") utimesSync(lock, LONG_AGO, LONG_AGO);
+      const out = observe(root);
+      if (RECLAIMED.has(state)) {
+        expect(out.error).toBeNull();
+        expect(out.owner?.pid).toEqual(expect.any(Number));
+        expect(out.stderr).toContain(CLEARED);
+        expectProject(root, true);
+      } else {
+        expect(out.error?.message).toBe(busyAt(root));
+        expect(out.stderr).not.toContain(CLEARED);
+        expect(readFileSync(lock, "utf8")).toBe(raw);
+        expectProject(root, false, [LOCK]);
+      }
+    });
+  }
+
+  // A holder outside the local gate (a release older than the gate, a command
+  // with another temp folder) can let its lock go while a waiter is still
+  // looking at it. Gone by the waiter's next look, the lock is free: the waiter
+  // takes it, as it would a moment later, and clears nothing. On Windows the
+  // read of a lock its holder is deleting fails for a moment before it is gone.
+  const letGoMoments = [
+    ["file", "lock"], ["directory", "lock"], ["directory", "owner"], ["file", "read"], ["directory", "read"],
+  ] as const;
+  for (const [kind, moment] of letGoMoments) {
+    const when = moment === "lock" ? "after the waiter's first look"
+      : moment === "owner" ? "before its owner is read" : "as its owner is read";
+    test.skipIf(moment === "read" && process.platform !== "win32")(`a ${kind} lock let go ${when} is taken`, () => {
+      const root = project(), lock = join(root, LOCK);
+      const live = { pid: process.pid, processGeneration: processGeneration(process.pid) };
+      if (kind === "directory") {
+        mkdirSync(lock);
+        writeFileSync(join(lock, "owner.json"), JSON.stringify({ ...owner(), ...live }));
+      } else {
+        writeFileSync(lock, `${JSON.stringify({ ...live, staging: ".aidlc-txn-held" })}\n`);
+      }
+      const out = observe(root, { letGo: moment });
+      expect(out.letGo).toBe(true);
+      expect(out.error).toBeNull();
+      expect(out.stderr).not.toContain(CLEARED);
+      expectProject(root, true);
+    });
+  }
+
+  // Only a lock gone by a later read is free: one still there keeps today's
+  // words, even when a later read on Windows reads its live owner.
+  for (const once of [false, true]) {
+    test(`a lock still there whose owner cannot be read ${once ? "the first time" : "at all"} stays unreadable`, () => {
+      const root = project(), lock = join(root, LOCK);
+      const raw = JSON.stringify({ ...owner(), pid: process.pid, processGeneration: processGeneration(process.pid) });
+      mkdirSync(lock);
+      writeFileSync(join(lock, "owner.json"), raw);
+      const out = observe(root, { fault: "owner-read", code: "EPERM", once });
+      expect(out.error).toMatchObject({
+        message: `${lock} cannot be read.`,
+        remediation: "if no AI-DLC command is running, delete that folder, then run this command again.",
+      });
+      if (once || process.platform !== "win32") expect(out.faultHits).toBe(1);
+      else expect(out.faultHits).toBeGreaterThan(1);
+      expect(out.stderr).not.toContain(CLEARED);
+      expect(readFileSync(join(lock, "owner.json"), "utf8")).toBe(raw);
+      expectProject(root, false, [LOCK]);
+    });
+  }
+
+  test("a live process's start time reads between its spawn and now", async () => {
+    const before = Date.now();
+    const child = Bun.spawn([process.execPath, "--eval", "setInterval(() => {}, 1000)"], {
+      stdout: "ignore", stderr: "ignore",
+    });
+    try {
+      const started = processStartedAtMs(child.pid);
+      expect(started).not.toBeNull();
+      // Linux counts from whole boot seconds, so it can read up to 1 s early.
+      expect(started as number).toBeGreaterThanOrEqual(before - 1_100);
+      expect(started as number).toBeLessThanOrEqual(Date.now() + 100);
+    } finally {
+      child.kill();
+      await child.exited;
+    }
+  });
+
+  test("directory release preserves a replacement owner's directory", () => {
+    const root = project();
+    const out = observe(root, { replaceOwner: true });
+    expect(out.error?.message).toBe("replacement installed");
+    expect(readFileSync(join(root, LOCK, "owner.json"), "utf8")).toBe(out.replacement!);
+    expectProject(root, false, [LOCK]);
+  });
+});
+
+// Rendezvous with actual processes, not a guessed sleep: contender uses an
+// alias while the holder is inside the local gate. The contender reads the busy
+// line, and its step (run it again once the holder is done) works.
+for (const [pause, crash] of [["acquire", false], ["locked", true], ["release", false], ["locked", false]] as const) {
+  test(`local gate spans ${pause}${crash ? " and recovers after SIGKILL" : ""}`, async () => {
+    const root = project(), alias = join(dirname(root), "alias");
+    symlinkSync(root, alias, process.platform === "win32" ? "junction" : "dir");
+    const child = Bun.spawn([process.execPath, "--eval", childSource(root, { pause })], {
+      cwd: REPO_ROOT, env: childEnv(), stdout: "pipe", stderr: "pipe",
+    });
+    const stdout = new Response(child.stdout).text(), stderr = new Response(child.stderr).text();
+    try {
+      const ready = join(dirname(root), "ready");
+      expect(await waitForBarrierLine(ready, { writer: child, timeoutMs: 10_000 })).toBe(`${pause}\n`);
+      const before = readdirSync(root).sort(), content = readFileSync(join(root, "existing.txt"), "utf8");
+      const blocked = observe(root, { requestedRoot: alias, contender: true });
+      expect(blocked.error).toMatchObject({ name: "TransactionBusyError", remediation: BUSY });
+      expect(blocked.error?.message).toStartWith("another AI-DLC command is still working in ");
+      expect(blocked.owner).toBeUndefined();
+      expect(readdirSync(root).sort()).toEqual(before);
+      expect(readFileSync(join(root, "existing.txt"), "utf8")).toBe(content);
+      if (crash) {
+        child.kill("SIGKILL");
+        await child.exited;
+        expect(observe(root).error).toBeNull();
+      } else {
+        writeFileSync(join(dirname(root), "continue"), "");
+        expect(await child.exited, await stderr).toBe(0);
+        const completed = JSON.parse(await stdout) as Observation;
+        expect(completed.error).toBeNull();
+        for (const gate of completed.gates) expect(existsSync(gate)).toBe(false);
+      }
+      expectProject(root, true);
+      const again = observe(root, { requestedRoot: alias, contender: true });
+      expect(again.error).toBeNull();
+      expect(readFileSync(join(root, "existing.txt"), "utf8")).toBe("contender\n");
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await Promise.all([child.exited, stdout, stderr]);
+    }
+  }, 40_000);
+}

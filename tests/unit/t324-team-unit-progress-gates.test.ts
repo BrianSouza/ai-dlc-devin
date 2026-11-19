@@ -1,0 +1,2022 @@
+// covers: subcommand:aidlc-orchestrate:next, subcommand:aidlc-orchestrate:report, subcommand:aidlc-state:set-unit-ownership, subcommand:aidlc-state:set-unit-gate-rhythm, subcommand:aidlc-state:refresh-unit-progress, audit:UNIT_OWNERSHIP_SET, audit:UNIT_GATE_RHYTHM_SET, function:UNIT_OWNERSHIP_FIELD, function:UNIT_GATE_RHYTHM_FIELD, function:isTeamUnitOwnership, function:readUnitGateRhythm, function:unitGateStatus, function:unitLifecycleSnapshot, function:unitMajorConstructionStageSlugs, function:deriveTeamUnitProgressModel
+
+import {
+  NATIVE_FIXTURE_SETUP_TIMEOUT_MS,
+  NATIVE_STARTUP_TIMEOUT_MS,
+  remainingOperationTimeoutMs,
+} from "../harness/test-budget.ts";
+import { afterEach, describe, expect, test, setDefaultTimeout } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
+import { appendAuditEntry } from "../../dist/claude/.claude/tools/aidlc-audit.ts";
+import {
+  artifactFilename,
+  auditBlockField,
+  findStageBySlug,
+  freshReviewReceipts,
+  isTeamUnitOwnership,
+  markHumanTurn,
+  parseCheckboxes,
+  readAllAuditShards,
+  readAuditShardEvents,
+  readUnitGateRhythm,
+  reviewAttemptAccounting,
+  reviewAttemptWindow,
+  UNIT_GATE_RHYTHM_FIELD,
+  UNIT_OWNERSHIP_FIELD,
+  turnEndIsOpen,
+  unitCompletedReceipts,
+  unitGateStatus,
+} from "../../dist/claude/.claude/tools/aidlc-lib.ts";
+import {
+  AIDLC_SRC,
+  cleanupTestProject,
+  createTestProject,
+  resetAidlcEnv,
+  runOrchestrateNext,
+  seedAidlcMemory,
+  seedBoltDag,
+  seededAuditDir,
+  seededRecordDir,
+  seededStateFile,
+} from "../harness/fixtures.ts";
+import {
+  deriveTeamUnitProgressModel,
+} from "../../dist/claude/.claude/tools/aidlc-orchestrate.ts";
+import {
+  reconstructTimeline,
+  runDiagnosis,
+} from "../../dist/claude/.claude/tools/aidlc-doctor-bundle.ts";
+import {
+  readReviewFindingDispositions,
+} from "../../dist/claude/.claude/tools/aidlc-review-brief.ts";
+import { renderTestingContract, resolveTestingPosture } from "../../dist/claude/.claude/tools/aidlc-testing-posture.ts";
+
+// The stage's checks run once before its review or gate, and again at the gate
+// (completionChecksStep, t-checks-before-review); this file's fixture documents
+// are not written for them and its subject is not them, so they stay off here.
+process.env.AIDLC_DISABLE_SENSORS = "1";
+
+setDefaultTimeout(NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+resetAidlcEnv();
+
+const BUN = process.execPath;
+const ORCH = join(AIDLC_SRC, "tools", "aidlc-orchestrate.ts");
+const STATE = join(AIDLC_SRC, "tools", "aidlc-state.ts");
+const LOG = join(AIDLC_SRC, "tools", "aidlc-log.ts");
+const UTIL = join(AIDLC_SRC, "tools", "aidlc-utility.ts");
+
+const ENV: NodeJS.ProcessEnv = {
+  ...process.env,
+  AIDLC_SKIP_ARTIFACT_GUARD: "1",
+  AIDLC_SKIP_HUMAN_PRESENCE_GUARD: "1",
+  AIDLC_SKIP_SUMMARY_CONFIRMATION_GUARD: "1",
+};
+delete ENV.AWS_AIDLC_DEFAULT_SCOPE;
+
+const PRODUCES: Record<string, string[]> = {
+  "functional-design": [
+    "entities",
+    "rules",
+    "functional-spec",
+    "frontend-components",
+    "traceability",
+  ],
+  "nfr-requirements": [
+    "performance-requirements",
+    "security-requirements",
+    "scalability-requirements",
+    "reliability-requirements",
+    "observability-requirements",
+    "tech-stack-decisions",
+    "traceability",
+  ],
+  "nfr-design": [
+    "performance-design",
+    "security-design",
+    "scalability-design",
+    "reliability-design",
+    "observability-design",
+    "logical-components",
+    "traceability",
+  ],
+  "infrastructure-design": [
+    "infrastructure-specification",
+    "monitoring-design",
+    "cicd-pipeline",
+    "traceability",
+  ],
+  "code-generation": [
+    "code-generation-plan",
+    "unit-test-instructions",
+    "code-summary",
+    "traceability",
+  ],
+};
+const BLOCK = [
+  "functional-design",
+  "nfr-requirements",
+  "nfr-design",
+  "infrastructure-design",
+  "code-generation",
+];
+
+// What the lead reads with the first team step, and when the rhythm holds.
+const APPROVALS_LINE = "Each team will approve its Unit after every stage. Do you want them to approve once at the " +
+  "end of each Unit instead? I'd keep after every stage, so a wrong turn is caught at the stage where it happens.";
+const RHYTHM_STAYS_PER_STAGE = "The Units are already being approved after every stage, so that stays for this " +
+  "work. Carry on with `/aidlc`.";
+const OWNERSHIP_STAYS = "The teams are already building their Units, so they keep them for this work. Carry on " +
+  "with `/aidlc`.";
+
+const tempDirs: string[] = [];
+afterEach(() => {
+  while (tempDirs.length) cleanupTestProject(tempDirs.pop());
+});
+
+interface Directive {
+  kind?: string;
+  stage?: string;
+  unit?: string;
+  gate?: unknown;
+  unit_gate?: string;
+  reviewer?: string;
+  message?: string;
+  [key: string]: unknown;
+}
+
+function constructionState(opts: {
+  ownership?: string;
+  rhythm?: "per-stage" | "unit-end";
+  scope?: string;
+} = {}): string {
+  const ownership = opts.ownership
+    ? `- **Unit Ownership**: ${opts.ownership}\n`
+    : "";
+  const rhythm = opts.rhythm
+    ? `- **Unit Gate Rhythm**: ${opts.rhythm}\n`
+    : "";
+  return `# AI-DLC State Tracking
+
+## Project Information
+- **Project**: team unit progress test
+- **Project Type**: Greenfield
+- **Scope**: ${opts.scope ?? "feature"}
+- **State Version**: 8
+- **Skeleton Stance**: on
+
+## Runtime State
+- **Revision Count**: 0
+- **Construction Iteration**: unit-major
+- **Plan Approval**: off (set by you)
+${ownership}${rhythm}
+## Scope Configuration
+- **Stages to Execute**: all
+- **Stages to Skip**: none
+- **Depth**: Standard
+- **Test Strategy**: Standard
+
+## Stage Progress
+
+### CONSTRUCTION PHASE
+- [-] functional-design — EXECUTE
+- [ ] nfr-requirements — EXECUTE
+- [ ] nfr-design — EXECUTE
+- [ ] infrastructure-design — EXECUTE
+- [ ] code-generation — EXECUTE
+- [ ] build-and-test — EXECUTE
+
+## Current Status
+- **Lifecycle Phase**: CONSTRUCTION
+- **Current Stage**: functional-design
+- **Status**: Running
+- **Last Updated**: 2026-08-20T00:00:00Z
+`;
+}
+
+function seedProject(opts: {
+  ownership?: string;
+  rhythm?: "per-stage" | "unit-end";
+  scope?: string;
+} = {}, units = ["alpha", "beta"]): string {
+  const proj = createTestProject();
+  tempDirs.push(proj);
+  seedAidlcMemory(proj);
+  writeFileSync(seededStateFile(proj), constructionState(opts));
+  seedBoltDag(proj, units);
+  return proj;
+}
+
+function runNext(proj: string): Directive {
+  return runNextWithEnv(proj, ENV);
+}
+
+function runNextWithEnv(
+  proj: string,
+  env: NodeJS.ProcessEnv,
+): Directive {
+  const result = runOrchestrateNext(ORCH, proj, [], { env });
+  if (!result.directive) {
+    throw new Error(`next failed: ${result.status}\n${result.stdout}\n${result.stderr}`);
+  }
+  return result.directive as Directive;
+}
+
+function runState(
+  proj: string,
+  args: string[],
+  env: Record<string, string | undefined> = ENV,
+): { rc: number; out: string } {
+  const result = spawnSync(BUN, [STATE, ...args, "--project-dir", proj], {
+    timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+    encoding: "utf-8",
+    env,
+  });
+  return {
+    rc: result.status ?? -1,
+    out: `${result.stdout ?? ""}${result.stderr ?? ""}`,
+  };
+}
+
+function runReport(proj: string, args: string[]): Directive {
+  const result = spawnSync(
+    BUN,
+    [ORCH, "report", ...args, "--project-dir", proj],
+    { timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), encoding: "utf-8", env: ENV },
+  );
+  try {
+    return JSON.parse((result.stdout ?? "").trim()) as Directive;
+  } catch {
+    throw new Error(`report failed: ${result.status}\n${result.stdout}\n${result.stderr}`);
+  }
+}
+
+function coverUnit(proj: string, unit: string, stage: string): void {
+  const dir = join(seededRecordDir(proj), "construction", unit, stage);
+  mkdirSync(dir, { recursive: true });
+  for (const artifact of PRODUCES[stage]) {
+    writeFileSync(
+      join(dir, artifactFilename(artifact)),
+      `# ${artifact} for ${unit}\n`,
+    );
+  }
+  if (stage === "code-generation") {
+    // A plan the engine can read, with its Testing Contract.
+    writeFileSync(
+      join(dir, artifactFilename("code-generation-plan")),
+      `# Plan for ${unit}\n\n${renderTestingContract(resolveTestingPosture(proj))}\n## Steps\n\n- [ ] Step 1\n`,
+    );
+    writeFileSync(
+      join(dir, "source-manifest.json"),
+      `${JSON.stringify({ stage, unit, version: 1, writes: [] }, null, 2)}\n`,
+    );
+  }
+}
+
+function addReviewFinding(
+  proj: string,
+  unit: string,
+  stage: string,
+  findingId = "R-01",
+): string {
+  const artifact = join(
+    seededRecordDir(proj),
+    "construction",
+    unit,
+    stage,
+    artifactFilename(PRODUCES[stage][0]),
+  );
+  const relativeArtifact = artifact.slice(proj.length + 1).replaceAll("\\", "/");
+  writeFileSync(
+    artifact,
+    [
+      `# ${stage} review fixture`,
+      "",
+      "## Review",
+      "",
+      "**Verdict:** NOT-READY",
+      "**Reviewer:** aidlc-architecture-reviewer-agent",
+      "**Date:** 2026-08-26T12:00:00Z",
+      "**Iteration:** 1",
+      "",
+      "### Findings",
+      "",
+      "| ID | Severity | Location | Finding | Required action | Status |",
+      "|---|---|---|---|---|---|",
+      `| ${findingId} | Major | ${relativeArtifact} > section | Unit concern | Fix the Unit | New |`,
+      "",
+      "### Summary",
+      "",
+      "Fixture review.",
+      "",
+    ].join("\n"),
+  );
+  return join(
+    relative(proj, dirname(artifact)),
+    artifactFilename(findStageBySlug(stage)!.review_artifact!),
+  ).replaceAll("\\", "/");
+}
+
+// Every simulated pass writes the review to the request's named record slot.
+let reviewPass = 0;
+
+function logReviewReady(
+  proj: string,
+  stage: string,
+  unit: string,
+  reviewer: string,
+): void {
+  let reviewedBody: string | null = null;
+  for (const artifact of PRODUCES[stage]) {
+    const content = readFileSync(
+      join(
+        seededRecordDir(proj),
+        "construction",
+        unit,
+        stage,
+        artifactFilename(artifact),
+      ),
+      "utf-8",
+    );
+    const reviewStart = content.search(/^## Review[ \t]*$/m);
+    if (reviewStart !== -1) {
+      reviewedBody = content.slice(reviewStart + "## Review".length).trimStart();
+      break;
+    }
+  }
+  const reviewArtifact = join(
+    seededRecordDir(proj),
+    "construction",
+    unit,
+    stage,
+    artifactFilename(findStageBySlug(stage)!.review_artifact!),
+  );
+  const current = readFileSync(reviewArtifact, "utf-8");
+  const staleAppendix = current.search(/^## Review[ \t]*$/m);
+  if (staleAppendix !== -1) {
+    writeFileSync(
+      reviewArtifact,
+      `${current.slice(0, staleAppendix).replace(/\s+$/, "")}\n`,
+    );
+  }
+  const base = [
+    LOG,
+    "review",
+    "--stage",
+    stage,
+    "--reviewer",
+    reviewer,
+    "--unit",
+    unit,
+    "--iteration",
+    "1",
+    "--project-dir",
+    proj,
+  ];
+  const request = spawnSync(BUN, base, { timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS), encoding: "utf-8", env: ENV });
+  if ((request.status ?? -1) !== 0) {
+    throw new Error(`review failed: ${request.stdout}${request.stderr}`);
+  }
+  const { reviewFile } = JSON.parse(request.stdout ?? "{}") as {
+    reviewFile: string;
+  };
+  const draft = join(proj, reviewFile);
+  mkdirSync(dirname(draft), { recursive: true });
+  writeFileSync(
+    draft,
+    reviewedBody?.replace("**Verdict:** NOT-READY", "**Verdict:** READY") ??
+      "**Verdict:** READY\n" +
+        `**Reviewer:** ${reviewer}\n` +
+        "**Iteration:** 1\n\n" +
+        `### Findings\n\nNo blocking findings (pass ${++reviewPass}).\n`,
+  );
+  const completed = spawnSync(BUN, [...base, "--verdict", "READY"], {
+    timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+    encoding: "utf-8",
+    env: ENV,
+  });
+  if ((completed.status ?? -1) !== 0) {
+    throw new Error(`review failed: ${completed.stdout}${completed.stderr}`);
+  }
+}
+
+function settleBody(proj: string, directive: Directive): void {
+  const stage = directive.stage!;
+  const unit = directive.unit!;
+  const started = runState(
+    proj,
+    ["unit", "start", "--stage", stage, "--unit", unit],
+  );
+  if (started.rc !== 0) {
+    throw new Error(`${started.out}\nnext=${JSON.stringify(runNext(proj))}`);
+  }
+  coverUnit(proj, unit, stage);
+  // With the plan written, `next` hands over its build: plan approval is off
+  // in this file, so it records that nobody was asked and the Unit completes.
+  if (stage === "code-generation") {
+    expect(runNext(proj)).toMatchObject({ kind: "run-stage", stage, unit, plan_approval: { status: "approved" } });
+  }
+  expect(runState(proj, ["unit", "complete", "--stage", stage, "--unit", unit]).rc)
+    .toBe(0);
+  if (directive.reviewer) {
+    logReviewReady(proj, stage, unit, directive.reviewer);
+  }
+}
+
+function approveGate(proj: string, directive: Directive): void {
+  const args = [
+    "--stage",
+    directive.stage!,
+    "--unit",
+    directive.unit!,
+  ];
+  expect(runReport(proj, [...args, "--result", "awaiting-approval"]).kind)
+    .toBe("print");
+  // A Unit approval never ends the workflow, so its done says the walk goes on.
+  expect(
+    runReport(proj, [
+      ...args,
+      "--result",
+      "approved",
+      "--user-input",
+      "Approve",
+    ]),
+  ).toMatchObject({ kind: "done", workflow_continues: true });
+}
+
+function state(proj: string): string {
+  return readFileSync(seededStateFile(proj), "utf-8");
+}
+
+function unitProgress(proj: string): string {
+  const content = state(proj);
+  const start = content.search(/^## Unit Progress$/m);
+  if (start < 0) return "";
+  const afterHeading = content.indexOf("\n", start) + 1;
+  const nextRelative = content.slice(afterHeading).search(/^## /m);
+  const end = nextRelative < 0 ? content.length : afterHeading + nextRelative;
+  return content.slice(start, end).trimEnd();
+}
+
+describe("t324 team-owned unit progress and per-unit gates", () => {
+  test("a merge override marks only merged status, not unsupported live stages", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    const model = deriveTeamUnitProgressModel(
+      proj,
+      state(proj),
+      undefined,
+      new Set(["alpha"]),
+      { ownerOverrides: new Map([["alpha", "team-a"]]) },
+    );
+    const row = model.section
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("| alpha |"))!;
+    expect(row).toContain("| alpha | - | [ ] |");
+    expect(row).toEndWith("| [ ] | [x] |");
+    expect(Object.values(model.stageStates)).not.toContain("completed");
+  });
+
+  const dormantStates: Array<{
+    name: string;
+    cover: (proj: string) => void;
+    expected: { stage: string; unit: string; gate: boolean };
+  }> = [
+    {
+      name: "empty coverage",
+      cover: () => {},
+      expected: { stage: "functional-design", unit: "alpha", gate: false },
+    },
+    {
+      name: "alpha functional-design covered",
+      cover: (proj) => coverUnit(proj, "alpha", "functional-design"),
+      expected: { stage: "nfr-requirements", unit: "alpha", gate: false },
+    },
+    {
+      name: "alpha first two stages covered",
+      cover: (proj) => {
+        coverUnit(proj, "alpha", "functional-design");
+        coverUnit(proj, "alpha", "nfr-requirements");
+      },
+      expected: { stage: "nfr-design", unit: "alpha", gate: false },
+    },
+  ];
+
+  const withoutQuestionRows = (audit: string): string => audit.split(/(?=\n## )/)
+    .filter((block) => !/^\*\*Event\*\*: QUESTION_(ASKED|SHOWN)$/m.test(block)).join("")
+    .replace(/^# AI-DLC Audit Log\n?$/, "");
+
+  for (const dormant of dormantStates) {
+    test(`dormancy [${dormant.name}]: absent, solo, and junk ownership are byte-identical`, () => {
+      const results = [undefined, "solo", "team-ish"].map((ownership) => {
+        const proj = seedProject(ownership ? { ownership } : {});
+        dormant.cover(proj);
+        const stateBefore = state(proj);
+        const auditBefore = readAllAuditShards(proj);
+        const directive = runNext(proj);
+        expect(state(proj)).toBe(stateBefore);
+        // The question `next` asks goes on the record when it is asked
+        // (QUESTION_ASKED: Arden's D1); nothing else is written.
+        expect(withoutQuestionRows(readAllAuditShards(proj))).toBe(withoutQuestionRows(auditBefore));
+        expect(unitProgress(proj)).toBe("");
+        expect("unit_gate" in directive).toBe(false);
+        return directive;
+      });
+      // With nothing built yet, nobody has said who builds the two Units, so
+      // the absent field is asked once (t-construction-staffing-question); a
+      // recorded answer routes as before.
+      if (dormant.name === "empty coverage") {
+        expect(results[0]).toMatchObject({ kind: "ask", ask_type: "construction-staffing" });
+      } else {
+        expect(results[1]).toEqual(results[0]);
+      }
+      expect(results[2]).toEqual(results[1]);
+      expect(results[1]).toMatchObject({
+        kind: "run-stage",
+        ...dormant.expected,
+      });
+    }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+  }
+
+  test("per-stage rhythm gates every settled pair before the next stage", () => {
+    const proj = seedProject({ ownership: "team" });
+    const unitGates: Directive[] = [];
+    for (const stage of BLOCK) {
+      const body = runNext(proj);
+      expect(body).toMatchObject({
+        kind: "run-stage",
+        stage,
+        unit: "alpha",
+        gate: false,
+      });
+      settleBody(proj, body);
+
+      const gate = runNext(proj);
+      expect(gate).toMatchObject({
+        kind: "run-stage",
+        stage,
+        unit: "alpha",
+        gate: true,
+        unit_gate: "per-stage",
+      });
+      unitGates.push(gate);
+      approveGate(proj, gate);
+    }
+    for (const stage of BLOCK) {
+      const body = runNext(proj);
+      expect(body).toMatchObject({
+        stage,
+        unit: "beta",
+        gate: false,
+      });
+      settleBody(proj, body);
+      const gate = runNext(proj);
+      expect(gate).toMatchObject({
+        stage,
+        unit: "beta",
+        gate: true,
+        unit_gate: "per-stage",
+      });
+      unitGates.push(gate);
+      approveGate(proj, gate);
+    }
+    expect(runNext(proj)).toMatchObject({
+      stage: "build-and-test",
+    });
+    expect(state(proj)).toContain("- [-] build-and-test — EXECUTE");
+    expect(state(proj)).toContain("- **Current Stage**: build-and-test");
+    expect(
+      runReport(proj, ["--stage", "build-and-test", "--result", "awaiting-approval"])
+        .kind,
+    ).toBe("print");
+    for (const stage of BLOCK) {
+      expect(state(proj)).toContain(`- [x] ${stage} — EXECUTE`);
+    }
+    expect(unitGates).toHaveLength(BLOCK.length * 2);
+    expect(unitGates.every((gate) => gate.unit_gate === "per-stage"))
+      .toBe(true);
+    expect(unitGates.every((gate) => typeof gate.unit === "string")).toBe(true);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // A `next` before a done Unit's completion receipt (a resume, a second chat)
+  // got the stage body back, so the Unit started over. The team route names
+  // the step the Unit still owes, as the solo routes do.
+  const named = (step: Directive): string[] =>
+    [...String(step.message).matchAll(/`([^`]+)`/g)].map((match) => match[1].replace(/^bun \S*aidlc-(\w+)\.ts /, "$1 "));
+
+  test("a Unit written and reviewed, with no completion receipt, is named its receipt, then its gate", () => {
+    const proj = seedProject({ ownership: "team" });
+    const body = runNext(proj);
+    expect(body).toMatchObject({ kind: "run-stage", stage: "functional-design", unit: "alpha", gate: false });
+    expect(typeof body.reviewer).toBe("string");
+    expect(runState(proj, ["unit", "start", "--stage", "functional-design", "--unit", "alpha"]).rc).toBe(0);
+    coverUnit(proj, "alpha", "functional-design");
+    logReviewReady(proj, "functional-design", "alpha", String(body.reviewer));
+    // The Stop hook's probe still sees the Unit's stage.
+    expect(runNextWithEnv(proj, { ...ENV, AIDLC_STOP_HOOK_PROBE: "1" }))
+      .toMatchObject({ kind: "run-stage", stage: "functional-design", unit: "alpha" });
+    const step = runNext(proj);
+    expect(step.kind, JSON.stringify(step)).toBe("print");
+    expect(named(step)).toEqual(["state unit complete --stage functional-design --unit alpha", "orchestrate next"]);
+    expect(runState(proj, ["unit", "complete", "--stage", "functional-design", "--unit", "alpha"]).rc).toBe(0);
+    expect(runNext(proj)).toMatchObject({
+      kind: "run-stage", stage: "functional-design", unit: "alpha", gate: true, unit_gate: "per-stage",
+    });
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // A started workflow is what shows the files are this attempt's (the
+  // stage's first attempt), so the fixture records its start.
+  test("a Unit whose files are written and never reviewed is named its review, then its receipt", () => {
+    const proj = seedProject({ ownership: "team" });
+    appendAuditEntry("WORKFLOW_STARTED", { Scope: "feature" }, proj);
+    const body = runNext(proj);
+    expect(body).toMatchObject({ kind: "run-stage", stage: "functional-design", unit: "alpha", gate: false });
+    expect(runState(proj, ["unit", "start", "--stage", "functional-design", "--unit", "alpha"]).rc).toBe(0);
+    coverUnit(proj, "alpha", "functional-design");
+    const review = runNext(proj);
+    expect(review.kind, JSON.stringify(review)).toBe("print");
+    const [request, then, ...rest] = named(review);
+    expect(request).toStartWith(`log review --stage functional-design --reviewer ${String(body.reviewer)} --unit alpha --iteration 1`);
+    expect([then, ...rest]).toEqual(["orchestrate next"]);
+    logReviewReady(proj, "functional-design", "alpha", String(body.reviewer));
+    expect(named(runNext(proj))).toEqual(["state unit complete --stage functional-design --unit alpha", "orchestrate next"]);
+    expect(runState(proj, ["unit", "complete", "--stage", "functional-design", "--unit", "alpha"]).rc).toBe(0);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("unit-end rhythm emits one chain gate after code-generation", () => {
+    const proj = seedProject(
+      { ownership: "team", rhythm: "unit-end" },
+      ["alpha", "beta"],
+    );
+    for (const unit of ["alpha", "beta"]) {
+      for (const stage of BLOCK) {
+        const body = runNext(proj);
+        expect(body).toMatchObject({
+          stage,
+          unit,
+          gate: false,
+        });
+        expect(body.unit_gate).toBeUndefined();
+        settleBody(proj, body);
+      }
+      const gate = runNext(proj);
+      expect(gate).toMatchObject({
+        stage: "code-generation",
+        unit,
+        gate: true,
+        unit_gate: "unit-end",
+      });
+      expect(state(proj)).toContain("- [-] functional-design — EXECUTE");
+      approveGate(proj, gate);
+    }
+    expect(runNext(proj)).toMatchObject({
+      stage: "build-and-test",
+    });
+    expect(state(proj)).toContain("- [-] build-and-test — EXECUTE");
+    expect(state(proj)).toContain("- **Current Stage**: build-and-test");
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("team ownership leaves ordinary Delivery Planning gates unitless", () => {
+    const proj = seedProject({ ownership: "team" });
+    writeFileSync(
+      seededStateFile(proj),
+      constructionState({ ownership: "team" })
+        .replace(
+          `### CONSTRUCTION PHASE
+- [-] functional-design — EXECUTE
+- [ ] nfr-requirements — EXECUTE
+- [ ] nfr-design — EXECUTE
+- [ ] infrastructure-design — EXECUTE
+- [ ] code-generation — EXECUTE
+- [ ] build-and-test — EXECUTE`,
+          `### INCEPTION PHASE
+- [-] delivery-planning — EXECUTE`,
+        )
+        .replace(
+          "- **Lifecycle Phase**: CONSTRUCTION",
+          "- **Lifecycle Phase**: INCEPTION",
+        )
+        .replace(
+          "- **Current Stage**: functional-design",
+          "- **Current Stage**: delivery-planning",
+        ),
+    );
+    expect(
+      runReport(proj, [
+        "--stage",
+        "delivery-planning",
+        "--result",
+        "awaiting-approval",
+      ]).kind,
+    ).toBe("print");
+    expect(state(proj)).toContain("- [?] delivery-planning — EXECUTE");
+  });
+
+  test("team per-unit gates require --unit and solo gates refuse it", () => {
+    const team = seedProject({ ownership: "team" }, ["alpha"]);
+    const missingUnit = runReport(team, [
+      "--stage",
+      "functional-design",
+      "--result",
+      "awaiting-approval",
+    ]);
+    expect(missingUnit.kind).toBe("error");
+    expect(missingUnit.message).toContain("requires --unit");
+
+    const solo = seedProject({ ownership: "solo" }, ["alpha"]);
+    const foreignUnit = runReport(solo, [
+      "--stage",
+      "functional-design",
+      "--unit",
+      "alpha",
+      "--result",
+      "awaiting-approval",
+    ]);
+    // A solo walk reports its Units itself: the agent is handed the step on.
+    expect(foreignUnit.kind).toBe("print");
+    expect(foreignUnit.message).toContain("A Unit is not reported on its own in this work");
+    expect(foreignUnit.message).not.toContain("Unit Ownership");
+  });
+
+  test("stop-hook probe next leaves team state and audit byte-identical", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    const stateBefore = state(proj);
+    const auditBefore = readAllAuditShards(proj);
+    expect(
+      runNextWithEnv(proj, { ...ENV, AIDLC_STOP_HOOK_PROBE: "1" }),
+    ).toMatchObject({
+      kind: "run-stage",
+      stage: "functional-design",
+      unit: "alpha",
+    });
+    expect(state(proj)).toBe(stateBefore);
+    expect(readAllAuditShards(proj)).toBe(auditBefore);
+  });
+
+  test("team projection preserves recomposed skipped per-unit stages", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    writeFileSync(
+      seededStateFile(proj),
+      state(proj).replace(
+        "- [ ] nfr-design — EXECUTE",
+        "- [S] nfr-design — SKIP",
+      ),
+    );
+    expect(runNext(proj)).toMatchObject({
+      stage: "functional-design",
+      unit: "alpha",
+    });
+    expect(state(proj)).toContain("- [S] nfr-design — SKIP");
+    expect(unitProgress(proj).split("\n")[2]).not.toContain("nfr-design");
+  });
+
+  test("unit-end excludes skipped mid-chain and anchors to the final unskipped stage", () => {
+    const midSkip = seedProject(
+      { ownership: "team", rhythm: "unit-end" },
+      ["alpha"],
+    );
+    writeFileSync(
+      seededStateFile(midSkip),
+      state(midSkip).replace(
+        "- [ ] nfr-design — EXECUTE",
+        "- [S] nfr-design — SKIP",
+      ),
+    );
+    for (const stage of BLOCK.filter((slug) => slug !== "nfr-design")) {
+      const body = runNext(midSkip);
+      expect(body).toMatchObject({ stage, unit: "alpha", gate: false });
+      settleBody(midSkip, body);
+    }
+    const midGate = runNext(midSkip);
+    expect(midGate).toMatchObject({
+      stage: "code-generation",
+      unit: "alpha",
+      unit_gate: "unit-end",
+    });
+    approveGate(midSkip, midGate);
+    const midAudit = readAllAuditShards(midSkip);
+    expect(midAudit).toContain(
+      "**Gate Stages**: functional-design,nfr-requirements,infrastructure-design,code-generation",
+    );
+    expect(midAudit).not.toContain(
+      "**Gate Stages**: functional-design,nfr-requirements,nfr-design",
+    );
+
+    const finalSkip = seedProject(
+      { ownership: "team", rhythm: "unit-end" },
+      ["alpha"],
+    );
+    writeFileSync(
+      seededStateFile(finalSkip),
+      state(finalSkip).replace(
+        "- [ ] code-generation — EXECUTE",
+        "- [S] code-generation — SKIP",
+      ),
+    );
+    for (const stage of BLOCK.filter((slug) => slug !== "code-generation")) {
+      const body = runNext(finalSkip);
+      expect(body).toMatchObject({ stage, unit: "alpha", gate: false });
+      settleBody(finalSkip, body);
+    }
+    const finalGate = runNext(finalSkip);
+    expect(finalGate).toMatchObject({
+      stage: "infrastructure-design",
+      unit: "alpha",
+      unit_gate: "unit-end",
+    });
+    approveGate(finalSkip, finalGate);
+    expect(readAllAuditShards(finalSkip)).toContain(
+      "**Gate Stages**: functional-design,nfr-requirements,nfr-design,infrastructure-design",
+    );
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("team block completion finalizes a plan with no later stage", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    writeFileSync(
+      seededStateFile(proj),
+      state(proj).replace(
+        "- [ ] build-and-test — EXECUTE",
+        `- [S] build-and-test — SKIP
+- [S] ci-pipeline — SKIP
+
+### OPERATION PHASE
+- [S] deployment-pipeline — SKIP
+- [S] environment-provisioning — SKIP
+- [S] deployment-execution — SKIP
+- [S] observability-setup — SKIP
+- [S] incident-response — SKIP
+- [S] performance-validation — SKIP
+- [S] feedback-optimization — SKIP`,
+      ),
+    );
+    for (const stage of BLOCK) {
+      const body = runNext(proj);
+      expect(body.stage).toBe(stage);
+      settleBody(proj, body);
+      approveGate(proj, runNext(proj));
+    }
+    expect(runNext(proj).kind).toBe("done");
+    expect(state(proj)).toContain("- **Status**: Completed");
+    expect(readAllAuditShards(proj)).toContain("**Event**: WORKFLOW_COMPLETED");
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("cross-shard boundary ties fail a unit gate closed", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    const ts = "2026-08-20T00:00:00Z";
+    const block = (event: string, fields: string) =>
+      `## ${event}\n**Timestamp**: ${ts}\n**Event**: ${event}\n${fields}\n---\n`;
+    mkdirSync(seededAuditDir(proj), { recursive: true });
+    writeFileSync(
+      join(seededAuditDir(proj), "aaaa-approved.md"),
+      block(
+        "GATE_APPROVED",
+        "**Stage**: functional-design\n**Unit**: alpha\n**Gate Scope**: per-stage",
+      ),
+    );
+    writeFileSync(
+      join(seededAuditDir(proj), "zzzz-boundary.md"),
+      block("WORKFLOW_STARTED", "**Scope**: feature"),
+    );
+    expect(unitGateStatus(proj, "functional-design", "alpha", "per-stage"))
+      .toBe("pending");
+  });
+
+  test("team routing fails closed when the authoritative Unit DAG disappears", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    rmSync(join(seededRecordDir(proj), "runtime-graph.json"), { force: true });
+    rmSync(
+      join(
+        seededRecordDir(proj),
+        "inception",
+        "units-generation",
+        "unit-of-work-dependency.md",
+      ),
+      { force: true },
+    );
+    const directive = runNext(proj);
+    expect(directive.kind, JSON.stringify(directive)).toBe("error");
+    expect(directive.message).toContain(
+      "Unit Ownership: team requires a valid non-empty authoritative Unit DAG",
+    );
+    expect(directive.unit).toBeUndefined();
+  });
+
+  test("team routing moves past a current stage the plan skips, the way solo routing does", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    writeFileSync(
+      seededStateFile(proj),
+      state(proj).replace(
+        "- [-] functional-design — EXECUTE",
+        "- [-] functional-design — SKIP",
+      ),
+    );
+    const directive = runNext(proj);
+    expect(directive.kind).toBe("print");
+    expect(directive.message).toContain("--result skipped");
+    expect(runReport(proj, [
+      "--stage", "functional-design", "--result", "skipped", "--reason", "stage is SKIP in the approved workflow plan",
+    ]).kind).not.toBe("error");
+    expect(runNext(proj)).toMatchObject({ kind: "run-stage", stage: "nfr-requirements", unit: "alpha" });
+  });
+
+  test("grid is derived, rewrites hand edits, derives columns, and refresh is guarded", () => {
+    const proj = seedProject({ ownership: "team" });
+    const first = runNext(proj);
+    expect(unitProgress(proj)).toContain("| alpha | - | [ ] | [ ] | [ ] | [ ] | [ ] | [ ] |");
+
+    expect(runState(proj, [
+      "unit",
+      "start",
+      "--stage",
+      first.stage!,
+      "--unit",
+      first.unit!,
+    ]).rc).toBe(0);
+    const resumed = runNext(proj);
+    expect(resumed).toMatchObject({ stage: "functional-design", unit: "alpha" });
+    expect(unitProgress(proj)).toContain("| alpha | - | [-] | [ ] | [ ] | [ ] | [ ] | [-] |");
+
+    coverUnit(proj, "alpha", "functional-design");
+    expect(runState(proj, [
+      "unit",
+      "complete",
+      "--stage",
+      "functional-design",
+      "--unit",
+      "alpha",
+    ]).rc).toBe(0);
+    logReviewReady(
+      proj,
+      "functional-design",
+      "alpha",
+      first.reviewer!,
+    );
+    expect(runNext(proj)).toMatchObject({
+      stage: "functional-design",
+      unit: "alpha",
+      gate: true,
+    });
+    expect(unitProgress(proj)).toContain("| alpha | - | [?] | [ ] | [ ] | [ ] | [ ] | [?] |");
+
+    writeFileSync(
+      seededStateFile(proj),
+      state(proj).replace(
+        "| alpha | - | [?] |",
+        "| alpha | - | [x] |",
+      ),
+    );
+    runNext(proj);
+    expect(unitProgress(proj)).toContain("| alpha | - | [?] |");
+
+    const authoritativeSection = unitProgress(proj);
+    const stateBeforeForgery = state(proj);
+    const auditBeforeForgery = readAllAuditShards(proj);
+    const forgedPayloads = [
+      {
+        section: `${authoritativeSection}\n## Current Status`,
+        stage_states: {},
+      },
+      {
+        section: `${authoritativeSection}\n- **Status**: Completed`,
+        stage_states: {},
+      },
+      {
+        section: authoritativeSection,
+        stage_states: Object.fromEntries(
+          BLOCK.map((slug) => [slug, "completed"]),
+        ),
+      },
+      {
+        section: authoritativeSection,
+        stage_states: { "functional-design": "in-progress" },
+      },
+      {
+        section: authoritativeSection,
+        stage_states: {
+          "functional-design": "in-progress",
+          "foreign-stage": "completed",
+        },
+      },
+    ];
+    for (const forged of forgedPayloads) {
+      const forgedPayload = Buffer.from(JSON.stringify(forged)).toString(
+        "base64url",
+      );
+      const refused = runState(
+        proj,
+        ["refresh-unit-progress", "--payload", forgedPayload],
+        { ...ENV, AIDLC_ALLOW_DIRECT_STATE_TRANSITIONS: "1" },
+      );
+      expect(refused.rc).not.toBe(0);
+      expect(state(proj)).toBe(stateBeforeForgery);
+      expect(readAllAuditShards(proj)).toBe(auditBeforeForgery);
+    }
+
+    const payload = Buffer.from(
+      JSON.stringify({
+        section: "## Unit Progress\n| unit | owner | gate |\n| --- | --- | --- |",
+        stage_states: {},
+      }),
+    ).toString("base64url");
+    const blocked = runState(
+      proj,
+      ["refresh-unit-progress", "--payload", payload],
+      { ...ENV, AIDLC_ALLOW_DIRECT_STATE_TRANSITIONS: undefined },
+    );
+    expect(blocked.rc).not.toBe(0);
+    expect(blocked.out).toContain(
+      "Stage status cannot be changed with aidlc-state.ts refresh-unit-progress",
+    );
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // The gate left revising by Request Changes is not open once the work is
+  // redone: its revised report puts it to the person again, and then their
+  // second Request Changes, and later their Approve, record.
+  test("a Unit gate rebuilt after Request Changes is reported revised before it is shown again", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    settleBody(proj, runNext(proj));
+    const args = ["--stage", "functional-design", "--unit", "alpha"];
+    expect(runReport(proj, [...args, "--result", "awaiting-approval"]).kind).toBe("print");
+    const requestChanges = [...args, "--result", "rejected", "--user-input", "Request Changes", "--reason", "Rename it"];
+    for (let round = 0; round < 2; round++) {
+      expect(runReport(proj, requestChanges).kind).toBe("print");
+      settleBody(proj, runNext(proj));
+      const step = runNext(proj);
+      expect(step.kind, JSON.stringify(step)).toBe("print");
+      expect(step.message).toContain("--unit alpha --result revised");
+      expect(runReport(proj, [...args, "--result", "revised"]).kind).toBe("print");
+      expect(runNext(proj)).toMatchObject({ stage: "functional-design", unit: "alpha", gate_only: true, unit_gate: "per-stage" });
+    }
+    expect(runReport(proj, [...args, "--result", "approved", "--user-input", "Approve"]))
+      .toMatchObject({ kind: "done" });
+    expect(unitGateStatus(proj, "functional-design", "alpha", "per-stage")).toBe("approved");
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // The same for the gate a Unit's Request Changes sends back to its whole
+  // block: Code Generation's gate is the Unit's one gate, and a second Request
+  // Changes is refused while it is revising.
+  test("a Unit's unit-end gate rebuilt after Request Changes is reported revised before it is shown again", () => {
+    const proj = seedProject({ ownership: "team", rhythm: "unit-end" }, ["alpha"]);
+    for (const _stage of BLOCK) settleBody(proj, runNext(proj));
+    const args = ["--stage", "code-generation", "--unit", "alpha"];
+    expect(runReport(proj, [...args, "--result", "awaiting-approval"]).kind).toBe("print");
+    const requestChanges = [...args, "--result", "rejected", "--user-input", "Request Changes", "--reason", "Rename it"];
+    for (let round = 0; round < 2; round++) {
+      expect(runReport(proj, requestChanges).kind).toBe("print");
+      let step = runNext(proj);
+      const redone: string[] = [];
+      while (step.kind === "run-stage" && !step.gate) {
+        const { stage, unit } = step;
+        redone.push(stage!);
+        expect(runState(proj, ["unit", "start", "--stage", stage!, "--unit", unit!]).rc).toBe(0);
+        coverUnit(proj, unit!, stage!);
+        expect(runState(proj, ["unit", "complete", "--stage", stage!, "--unit", unit!]).rc).toBe(0);
+        if (step.reviewer) logReviewReady(proj, stage!, unit!, step.reviewer);
+        step = runNext(proj);
+      }
+      expect(step.kind, JSON.stringify(step)).toBe("print");
+      // A Unit that ran Code Generation has it reopened with the rest.
+      expect(redone).toContain("code-generation");
+      expect(step.message).toContain("--stage code-generation --unit alpha --result revised");
+      expect(runReport(proj, [...args, "--result", "revised"]).kind).toBe("print");
+      expect(runNext(proj)).toMatchObject({ stage: "code-generation", unit: "alpha", gate: true, unit_gate: "unit-end" });
+    }
+    expect(runReport(proj, [...args, "--result", "approved", "--user-input", "Approve"]))
+      .toMatchObject({ kind: "done" });
+    expect(unitGateStatus(proj, "code-generation", "alpha", "unit-end")).toBe("approved");
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("unit-keyed rejection floors only the rejected unit's lifecycle and review receipts", () => {
+    const proj = seedProject({ ownership: "team" });
+    for (const unit of ["alpha", "beta"]) {
+      coverUnit(proj, unit, "functional-design");
+      appendAuditEntry(
+        "UNIT_COMPLETED",
+        {
+          Stage: "functional-design",
+          Unit: unit,
+          "Run floor": "unstarted#0",
+        },
+        proj,
+      );
+      logReviewReady(
+        proj,
+        "functional-design",
+        unit,
+        "aidlc-architecture-reviewer-agent",
+      );
+    }
+    expect([...unitCompletedReceipts(proj, "functional-design")].sort())
+      .toEqual(["alpha", "beta"]);
+
+    const rejected = runReport(proj, [
+      "--stage",
+      "functional-design",
+      "--unit",
+      "alpha",
+      "--result",
+      "rejected",
+      "--reason",
+      "Change alpha only",
+      "--user-input",
+      "Change alpha only",
+    ]);
+    expect(rejected.kind).toBe("print");
+    expect([...unitCompletedReceipts(proj, "functional-design")])
+      .toEqual(["beta"]);
+    const stage = findStageBySlug("functional-design")!;
+    const reviews = freshReviewReceipts(proj, state(proj), stage);
+    expect([...reviews.unitVerdicts.keys()]).toEqual(["beta"]);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("a team Unit gate's Request Changes records the person's typed words", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    settleBody(proj, runNext(proj));
+    expect(runNext(proj)).toMatchObject({ stage: "functional-design", unit: "alpha", gate: true });
+    const args = ["--stage", "functional-design", "--unit", "alpha"];
+    expect(runReport(proj, [...args, "--result", "awaiting-approval"]).kind).toBe("print");
+    const session = "01995000-7a11-7000-8000-0000000324aa";
+    const typed = 'Split "alpha" & "beta" entities; keep the rules as they are.';
+    const env: NodeJS.ProcessEnv = { ...ENV, AIDLC_SESSION_OVERRIDE: session, AIDLC_UNATTENDED: "0" };
+    delete env.AIDLC_SESSION_OVERRIDE_SOURCE;
+    const hook = spawnSync(BUN, [join(AIDLC_SRC, "tools", "aidlc.ts"), "engine", "hook", "record-human-turn"], {
+      cwd: proj,
+      input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: session, prompt: typed }),
+      env: { ...env, CLAUDE_PROJECT_DIR: proj, AIDLC_PROJECT_DIR: proj },
+      encoding: "utf-8",
+      timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+    });
+    expect(hook.status, hook.stderr).toBe(0);
+    const rejected = spawnSync(BUN, [
+      ORCH, "report", ...args, "--result", "rejected", "--user-input", "Request Changes",
+      "--reason", "Split the entities", "--project-dir", proj,
+    ], { env, encoding: "utf-8", timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS) });
+    const directive = JSON.parse((rejected.stdout ?? "").trim()) as Directive;
+    expect(directive.kind, rejected.stdout + rejected.stderr).toBe("print");
+    expect(directive.message).toStartWith('Recorded rejected for unit "alpha" of "functional-design".');
+    // Their words are on the record; the step never repeats them.
+    expect(directive.message).toContain("in the person's own words");
+    expect(directive.message).not.toContain(typed);
+    const row = (event: string) => readAuditShardEvents(proj).filter((entry) => entry.event === event).at(-1)!.block;
+    expect(auditBlockField(row("GATE_REJECTED"), "Unit")).toBe("alpha");
+    expect(auditBlockField(row("GATE_REJECTED"), "Feedback")).toBe(typed);
+    expect(auditBlockField(row("GATE_REJECTED"), "Conductor Summary")).toBe("Split the entities");
+    expect(auditBlockField(row("STAGE_REVISING"), "Feedback")).toBe(typed);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // A teammate's Unit documents are in the checkout (the team's work arrives
+  // by git): the decisions they leave open, and their checks, are that team's
+  // to decide. One Unit's gate, opened and re-opened, records its own, and its
+  // approval accepts its own open decisions only.
+  test("a team Unit's gate records only its own open decisions and checks, and its approval accepts only those", () => {
+    const proj = seedProject({ ownership: "team" });
+    const decisions = (id: string): string =>
+      `\n\`\`\`aidlc-decisions\ndecisions:\n  - id: ${id}\n    decision: Left to the person\n    owner: person\n    blocking: false\n\`\`\`\n`;
+    const spec = (unit: string): string =>
+      join(seededRecordDir(proj), "construction", unit, "functional-design", artifactFilename("functional-spec"));
+    coverUnit(proj, "beta", "functional-design");
+    writeFileSync(spec("beta"), `# functional-spec for beta\n${decisions("BETA-D1")}`);
+    const build = (): void => {
+      const body = runNext(proj);
+      expect(body).toMatchObject({ kind: "run-stage", stage: "functional-design", unit: "alpha", gate: false });
+      expect(runState(proj, ["unit", "start", "--stage", "functional-design", "--unit", "alpha"]).rc).toBe(0);
+      coverUnit(proj, "alpha", "functional-design");
+      writeFileSync(spec("alpha"), `# functional-spec for alpha\n${decisions("ALPHA-D1")}`);
+      expect(runState(proj, ["unit", "complete", "--stage", "functional-design", "--unit", "alpha"]).rc).toBe(0);
+      logReviewReady(proj, "functional-design", "alpha", String(body.reviewer));
+    };
+    build();
+    const args = ["--stage", "functional-design", "--unit", "alpha"];
+    expect(runReport(proj, [...args, "--result", "awaiting-approval"]).kind).toBe("print");
+    expect(runReport(proj, [...args, "--result", "rejected", "--user-input", "Request Changes", "--reason", "Rename it"]).kind)
+      .toBe("print");
+    build();
+    expect(runReport(proj, [...args, "--result", "revised"]).kind).toBe("print");
+    expect(runReport(proj, [...args, "--result", "approved", "--user-input", "Approve"])).toMatchObject({ kind: "done" });
+    const alphaRows = (event: string) => readAuditShardEvents(proj).filter((entry) =>
+      entry.event === event && auditBlockField(entry.block, "Unit") === "alpha");
+    const opened = alphaRows("STAGE_AWAITING_APPROVAL");
+    expect(opened).toHaveLength(2);
+    for (const open of opened) {
+      expect(auditBlockField(open.block, "Open Decisions")).toBe("1");
+      expect(auditBlockField(open.block, "Decisions")).toBe("ALPHA-D1");
+      const checks = auditBlockField(open.block, "Sensor State") ?? "";
+      expect(checks).toContain("/construction/alpha/functional-design/");
+      expect(checks).not.toContain("/construction/beta/");
+    }
+    expect(auditBlockField(alphaRows("GATE_APPROVED").at(-1)!.block, "Decisions Accepted Open")).toBe("ALPHA-D1");
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // The count Accept as-is waits on (#1083), at a team Unit's gate: the reply
+  // that shows the gate again carries this Unit's own change requests, never
+  // another Unit's at the same stage.
+  test("a team Unit gate shown again carries that Unit's change-request count", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    settleBody(proj, runNext(proj));
+    expect(runNext(proj)).toMatchObject({ stage: "functional-design", unit: "alpha", gate: true });
+    const args = ["--stage", "functional-design", "--unit", "alpha"];
+    expect(runReport(proj, [...args, "--result", "awaiting-approval"]).kind).toBe("print");
+    appendAuditEntry("GATE_REJECTED", { Stage: "functional-design", Unit: "beta", Feedback: "beta only" }, proj);
+    type GateReply = Directive & { revision_cycle?: number; accept_as_is?: string };
+    const shown: GateReply[] = [];
+    for (let round = 1; round <= 3; round++) {
+      const rejected = runReport(proj, [
+        ...args, "--result", "rejected", "--user-input", "Request Changes", "--reason", `change ${round}`,
+      ]);
+      expect(rejected.kind, JSON.stringify(rejected)).toBe("print");
+      // The Unit redoes its step, as the person asked, before its gate is shown again.
+      settleBody(proj, runNext(proj));
+      shown.push(runReport(proj, [...args, "--result", "revised"]) as GateReply);
+    }
+    expect(shown.map((reply) => [reply.kind, reply.revision_cycle, reply.accept_as_is])).toEqual([
+      ["print", 1, undefined],
+      ["print", 2, "next-revision"],
+      ["print", 3, "offered"],
+    ]);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // A live run (Codex): the person asked for another review at an open gate,
+  // the agent showed the gate again, and the Stop hook carried the turn on into
+  // a second showing. The report that shows a team Unit's open gate again ends
+  // the turn as the stage's does, until the person writes.
+  test("a team Unit gate shown again by its report ends the turn", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    settleBody(proj, runNext(proj));
+    expect(runNext(proj)).toMatchObject({ stage: "functional-design", unit: "alpha", gate: true });
+    const args = ["--stage", "functional-design", "--unit", "alpha", "--result", "awaiting-approval"];
+    expect(runReport(proj, args).kind).toBe("print");
+    markHumanTurn(proj);
+    Bun.sleepSync(20);
+    expect(runReport(proj, args).message).toBe('Unit "alpha" gate for "functional-design" is already awaiting approval.');
+    expect(turnEndIsOpen(proj)).toBe(true);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // A conductor that reports a team Unit gate complete before asking it gets
+  // that Unit's question opened, never a stage-wide gate or an approval.
+  test("a team Unit gate reported complete before its question opens only that Unit's question", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    settleBody(proj, runNext(proj));
+    expect(runNext(proj)).toMatchObject({ stage: "functional-design", unit: "alpha", gate: true });
+    const env: NodeJS.ProcessEnv = { ...ENV };
+    delete env.AIDLC_SKIP_HUMAN_PRESENCE_GUARD;
+    const report = (args: string[]): Directive => {
+      const result = spawnSync(BUN, [
+        ORCH, "report", "--stage", "functional-design", ...args, "--project-dir", proj,
+      ], { env, encoding: "utf-8", timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS) });
+      return JSON.parse((result.stdout ?? "").trim()) as Directive;
+    };
+
+    const unitless = report(["--result", "completed"]);
+    expect(unitless.kind).toBe("error");
+    expect(unitless.message).toContain("requires --unit");
+
+    const opened = report(["--unit", "alpha", "--result", "completed"]);
+    expect(opened.kind, JSON.stringify(opened)).toBe("print");
+    expect(opened.message).toContain('Unit "alpha" of "functional-design" has not asked for approval yet');
+    expect(opened.message).toContain("nothing is approved until they answer");
+    const events = readAuditShardEvents(proj);
+    const awaiting = events.filter((entry) => entry.event === "STAGE_AWAITING_APPROVAL");
+    expect(awaiting.map((entry) => auditBlockField(entry.block, "Unit"))).toEqual(["alpha"]);
+    expect(events.some((entry) => entry.event === "GATE_APPROVED")).toBe(false);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("team gates record review finding dispositions for only the gated Unit", () => {
+    const approved = seedProject({ ownership: "team" }, ["alpha"]);
+    const approvedDirective = runNext(approved);
+    expect(approvedDirective).toMatchObject({
+      stage: "functional-design",
+      unit: "alpha",
+    });
+    expect(
+      runState(approved, [
+        "unit",
+        "start",
+        "--stage",
+        "functional-design",
+        "--unit",
+        "alpha",
+      ]).rc,
+    ).toBe(0);
+    coverUnit(approved, "alpha", "functional-design");
+    addReviewFinding(approved, "alpha", "functional-design");
+    expect(
+      runState(approved, [
+        "unit",
+        "complete",
+        "--stage",
+        "functional-design",
+        "--unit",
+        "alpha",
+      ]).rc,
+    ).toBe(0);
+    logReviewReady(
+      approved,
+      "functional-design",
+      "alpha",
+      approvedDirective.reviewer!,
+    );
+    expect(
+      runReport(approved, [
+        "--stage",
+        "functional-design",
+        "--unit",
+        "alpha",
+        "--result",
+        "awaiting-approval",
+      ]).kind,
+    ).toBe("print");
+    expect(
+      runReport(approved, [
+        "--stage",
+        "functional-design",
+        "--unit",
+        "alpha",
+        "--result",
+        "approved",
+        "--user-input",
+        "Approve",
+      ]).kind,
+    ).toBe("done");
+    expect([
+      ...readReviewFindingDispositions(
+        approved,
+        "functional-design",
+        "alpha",
+      ).values(),
+    ]).toMatchObject([{ status: "Accepted risk" }]);
+
+    const rejected = seedProject({ ownership: "team" }, ["alpha"]);
+    const rejectedDirective = runNext(rejected);
+    expect(
+      runState(rejected, [
+        "unit",
+        "start",
+        "--stage",
+        "functional-design",
+        "--unit",
+        "alpha",
+      ]).rc,
+    ).toBe(0);
+    coverUnit(rejected, "alpha", "functional-design");
+    const artifact = addReviewFinding(
+      rejected,
+      "alpha",
+      "functional-design",
+    );
+    expect(
+      runState(rejected, [
+        "unit",
+        "complete",
+        "--stage",
+        "functional-design",
+        "--unit",
+        "alpha",
+      ]).rc,
+    ).toBe(0);
+    logReviewReady(
+      rejected,
+      "functional-design",
+      "alpha",
+      rejectedDirective.reviewer!,
+    );
+    expect(
+      runReport(rejected, [
+        "--stage",
+        "functional-design",
+        "--unit",
+        "alpha",
+        "--result",
+        "awaiting-approval",
+      ]).kind,
+    ).toBe("print");
+    const rejectedReport = runReport(rejected, [
+      "--stage",
+      "functional-design",
+      "--unit",
+      "alpha",
+      "--result",
+      "rejected",
+      "--reason",
+      "Revise the Unit design",
+      "--reject-finding",
+      `${artifact}#R-01=This concern must be addressed`,
+    ]);
+    expect(rejectedReport.kind).toBe("print");
+    expect([
+      ...readReviewFindingDispositions(
+        rejected,
+        "functional-design",
+        "alpha",
+      ).values(),
+    ]).toMatchObject([
+      { status: "Rejected: This concern must be addressed" },
+    ]);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // At a team Unit gate the agent logs the blocking-check question and the
+  // person's Fix findings pick with --unit (stage-protocol-construction.md), and
+  // the pick starts a new attempt for that Unit only, as its Request Changes
+  // does. A teammate's question for the same stage, in their own shard between
+  // the two, does not take the pick's place.
+  test("a Unit's Fix findings pick at a blocking check floors only that Unit's review receipt", () => {
+    const proj = seedProject({ ownership: "team" });
+    for (const unit of ["alpha", "beta"]) {
+      // A team Unit's records hang off its start: each teammate's own.
+      appendAuditEntry("UNIT_STARTED", { Stage: "functional-design", Unit: unit, "Run floor": "unstarted#0" }, proj);
+      coverUnit(proj, unit, "functional-design");
+      logReviewReady(proj, "functional-design", unit, "aidlc-architecture-reviewer-agent");
+    }
+    const stage = findStageBySlug("functional-design")!;
+    const reviewed = () => [...freshReviewReceipts(proj, state(proj), stage).unitVerdicts.keys()].sort();
+    expect(reviewed()).toEqual(["alpha", "beta"]);
+    const log = (args: string[]) => {
+      const r = spawnSync(BUN, [LOG, ...args, "--stage", "functional-design", "--unit", "alpha", "--project-dir", proj], {
+        env: ENV, encoding: "utf-8", timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+      });
+      expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+    };
+    log(["decision", "--decision", "Blocking gate sensor failure", "--options", "Fix findings,Override blocking sensors"]);
+    const asked = readAuditShardEvents(proj).findLast((row) => row.event === "DECISION_RECORDED")!;
+    writeFileSync(
+      join(seededAuditDir(proj), "zzzz-teammate.md"),
+      `## DECISION_RECORDED\n**Timestamp**: ${asked.timestamp}\n**Event**: DECISION_RECORDED\n` +
+        "**Stage**: functional-design\n**Unit**: beta\n**Decision**: Which entities does beta own?\n**Options**: A,B\n\n---\n",
+    );
+    Bun.sleepSync(1100);
+    appendAuditEntry("HUMAN_TURN", { Session: "t324-fix-findings" }, proj);
+    log(["answer", "--details", "Fix findings"]);
+    expect(reviewed()).toEqual(["beta"]);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // In solo work the blocking check runs once at the stage's gate over every
+  // Unit's outputs, and the pick is logged with no Unit (solo gate-start takes
+  // no --unit). Where floors are per Unit, the pick starts a new attempt, its
+  // review budget included, for the Units whose outputs the failing check
+  // named on its latest result before the pick: a later pass clears a failure,
+  // and an advisory check's failure names nothing. A pick whose check named no
+  // Unit, and any pick in stage-major work, starts every Unit again.
+  test("a solo Fix findings pick starts again only the Units the failing check named", () => {
+    const reviewer = "aidlc-architecture-reviewer-agent";
+    const shipped = findStageBySlug("functional-design")!;
+    const stage = {
+      ...shipped,
+      sensors_applicable: [
+        { id: "no-tbd", path: ".claude/sensors/aidlc-no-tbd.md", fire_on: "gate" as const, default_severity: "blocking" as const },
+        { id: "required-sections", path: ".claude/sensors/aidlc-required-sections.md", fire_on: "gate" as const, default_severity: "advisory" as const },
+      ],
+    };
+    const picked = (iteration: string): string => {
+      const proj = seedProject({}, ["alpha", "beta", "gamma"]);
+      writeFileSync(seededStateFile(proj), state(proj).replace("- **Construction Iteration**: unit-major\n", iteration));
+      for (const unit of ["alpha", "beta", "gamma"]) {
+        coverUnit(proj, unit, "functional-design");
+        logReviewReady(proj, "functional-design", unit, reviewer);
+      }
+      const result = (event: string, id: string, unit: string) => appendAuditEntry(event, {
+        "Sensor ID": id,
+        "Stage slug": "functional-design",
+        "Output path": relative(proj, join(seededRecordDir(proj), "construction", unit, "functional-design",
+          artifactFilename("entities"))).replaceAll("\\", "/"),
+        ...(event === "SENSOR_FAILED" ? { "Detail path": "detail.md", "Findings count": "1" } : {}),
+      }, proj);
+      result("SENSOR_FAILED", "no-tbd", "alpha");
+      result("SENSOR_FAILED", "required-sections", "beta");
+      result("SENSOR_FAILED", "no-tbd", "gamma");
+      result("SENSOR_PASSED", "no-tbd", "gamma");
+      const log = (args: string[]) => {
+        const r = spawnSync(BUN, [LOG, ...args, "--stage", "functional-design", "--project-dir", proj], {
+          env: ENV, encoding: "utf-8", timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+        });
+        expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+      };
+      log(["decision", "--decision", "Blocking gate sensor failure", "--options", "Fix findings,Override blocking sensors"]);
+      appendAuditEntry("HUMAN_TURN", { Session: "t324-solo-fix-findings" }, proj);
+      log(["answer", "--details", "Fix findings"]);
+      return proj;
+    };
+    const reviewed = (proj: string, at: typeof shipped) =>
+      [...freshReviewReceipts(proj, state(proj), at).unitVerdicts.keys()].sort();
+
+    const checkpoints = picked("- **Construction Iteration**: unit-major\n- **Construction Checkpoints**: enabled\n");
+    expect(reviewed(checkpoints, stage)).toEqual(["beta", "gamma"]);
+    const view = reviewAttemptWindow(checkpoints, state(checkpoints), stage);
+    const passes = ["alpha", "beta", "gamma"].map((unit) =>
+      reviewAttemptAccounting(checkpoints, view, state(checkpoints), stage, reviewer, unit, undefined));
+    expect(passes.map((pass) => pass.requestCount)).toEqual([0, 1, 1]);
+    expect(passes[0].budgetCount).toBe(0);
+    // The re-review its checkpoint names is that first pass.
+    expect(freshReviewReceipts(checkpoints, state(checkpoints), stage).unitStaleProgress.get("alpha")?.nextIteration).toBe(1);
+    expect(reviewed(checkpoints, shipped)).toEqual([]);
+
+    const stageMajor = picked("- **Construction Iteration**: stage-major\n");
+    expect(reviewed(stageMajor, stage)).toEqual([]);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("legacy unitless rejection remains stage-global under team ownership", () => {
+    const proj = seedProject({ ownership: "team" });
+    for (const unit of ["alpha", "beta"]) {
+      coverUnit(proj, unit, "functional-design");
+      appendAuditEntry(
+        "UNIT_COMPLETED",
+        {
+          Stage: "functional-design",
+          Unit: unit,
+          "Run floor": "unstarted#0",
+        },
+        proj,
+      );
+    }
+    expect([...unitCompletedReceipts(proj, "functional-design")].sort())
+      .toEqual(["alpha", "beta"]);
+    appendAuditEntry(
+      "GATE_REJECTED",
+      {
+        Stage: "functional-design",
+        Feedback: "legacy stage-global rejection",
+      },
+      proj,
+    );
+    expect([...unitCompletedReceipts(proj, "functional-design")]).toEqual([]);
+  });
+
+  test("set verbs enforce prerequisites, defaults, values, and emit audit events", () => {
+    const noDag = createTestProject();
+    tempDirs.push(noDag);
+    seedAidlcMemory(noDag);
+    writeFileSync(seededStateFile(noDag), constructionState());
+    const missingDag = runState(noDag, ["set-unit-ownership", "team"]);
+    expect(missingDag.rc).not.toBe(0);
+    expect(missingDag.out).toContain("requires a non-empty authoritative unit DAG");
+
+    const proj = seedProject();
+    appendAuditEntry(
+      "UNIT_STARTED",
+      {
+        Stage: "functional-design",
+        Unit: "alpha",
+        "Run floor": "unstarted#0",
+      },
+      proj,
+    );
+    writeFileSync(
+      seededStateFile(proj),
+      state(proj).replace("- **Construction Iteration**: unit-major\n", ""),
+    );
+    const prematureRhythm = runState(
+      proj,
+      ["set-unit-gate-rhythm", "unit-end"],
+    );
+    expect(prematureRhythm.rc).not.toBe(0);
+    expect(prematureRhythm.out).toContain("requires Unit Ownership: team");
+
+    // Teams on a plan that is not one Unit at a time: the pick switches it.
+    const teams = runState(proj, ["set-unit-ownership", "team"]);
+    expect(teams.rc, teams.out).toBe(0);
+    expect(teams.out).toContain("Construction now builds one Unit at a time");
+    expect(state(proj)).toContain("- **Construction Iteration**: unit-major");
+    expect(state(proj)).toContain("- **Unit Ownership**: team");
+    expect(UNIT_OWNERSHIP_FIELD).toBe("Unit Ownership");
+    expect(isTeamUnitOwnership(state(proj))).toBe(true);
+    expect(readUnitGateRhythm(state(proj))).toBe("per-stage");
+    expect(runState(proj, ["set-unit-gate-rhythm", "unit-end"]).rc).toBe(0);
+    expect(state(proj)).toContain("- **Unit Gate Rhythm**: unit-end");
+    expect(UNIT_GATE_RHYTHM_FIELD).toBe("Unit Gate Rhythm");
+    expect(readUnitGateRhythm(state(proj))).toBe("unit-end");
+
+    appendAuditEntry(
+      "UNIT_STARTED",
+      {
+        Stage: "functional-design",
+        Unit: "alpha",
+        "Run floor": "unstarted#0",
+      },
+      proj,
+    );
+    const frozenOwnership = runState(proj, ["set-unit-ownership", "solo"]);
+    expect(frozenOwnership.rc).not.toBe(0);
+    expect(frozenOwnership.out).toContain(OWNERSHIP_STAYS);
+    // A started Unit routes the same under either rhythm; its first gate
+    // fixes the rhythm.
+    expect(runState(proj, ["set-unit-gate-rhythm", "per-stage"]).rc).toBe(0);
+    appendAuditEntry(
+      "STAGE_AWAITING_APPROVAL",
+      {
+        Stage: "functional-design",
+        Unit: "alpha",
+        "Gate Scope": "per-stage",
+        "Gate Stages": "functional-design",
+      },
+      proj,
+    );
+    const frozenRhythm = runState(
+      proj,
+      ["set-unit-gate-rhythm", "unit-end"],
+    );
+    expect(frozenRhythm.rc).not.toBe(0);
+    expect(frozenRhythm.out).toContain(RHYTHM_STAYS_PER_STAGE);
+
+    appendAuditEntry(
+      "STAGE_JUMPED",
+      {
+        Stage: "functional-design",
+        Direction: "redo",
+      },
+      proj,
+    );
+    expect(runState(proj, ["set-unit-gate-rhythm", "unit-end"]).rc).toBe(0);
+    expect(runState(proj, ["set-unit-ownership", "solo"]).rc).toBe(0);
+
+    expect(runState(proj, ["set-unit-ownership", "bogus"]).rc).not.toBe(0);
+    expect(runState(proj, ["set-unit-gate-rhythm", "bogus"]).rc).not.toBe(0);
+    const audit = readAllAuditShards(proj);
+    expect(audit).toContain("**Event**: UNIT_OWNERSHIP_SET");
+    expect(audit).toContain("**Event**: UNIT_GATE_RHYTHM_SET");
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("team ownership rejects recorded workspace repos before changing state", () => {
+    const proj = seedProject();
+    const registryPath = join(
+      proj,
+      "aidlc",
+      "spaces",
+      "default",
+      "intents",
+      "intents.json",
+    );
+    const registry = JSON.parse(readFileSync(registryPath, "utf-8")) as Array<
+      Record<string, unknown>
+    >;
+    registry[0].repos = ["repo-a", "repo-b"];
+    writeFileSync(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+    const stateBefore = state(proj);
+    const auditBefore = readAllAuditShards(proj);
+
+    const result = runState(proj, ["set-unit-ownership", "team"]);
+    expect(result.rc).not.toBe(0);
+    expect(result.out).toContain("This work spans 2 repos, so this session builds its Units: teams each owning a " +
+      "Unit is not available yet for work across repos. Carry on with `/aidlc`.");
+    expect(state(proj)).toBe(stateBefore);
+    expect(readAllAuditShards(proj)).toContain("**Event**: ERROR_LOGGED");
+    expect(readAllAuditShards(proj)).not.toContain(
+      "**Event**: UNIT_OWNERSHIP_SET",
+    );
+    expect(auditBefore).toBe("");
+  });
+
+  test("switching team ownership off removes only Unit Progress bytes", () => {
+    const proj = seedProject({ ownership: "team" }, ["alpha"]);
+    runNext(proj);
+    const withGrid = state(proj).replace(
+      "## Scope Configuration",
+      "## Scope Configuration\n\n\n<!-- unrelated spacing -->",
+    ).replace("\n## Unit Progress", "\n\n\n## Unit Progress");
+    writeFileSync(seededStateFile(proj), withGrid);
+    const expected = withGrid.replace(
+      /^## Unit Progress\r?\n[\s\S]*?(?=^## Current Status$)/m,
+      "",
+    );
+    expect(runState(proj, ["set-unit-ownership", "solo"]).rc).toBe(0);
+    expect(state(proj)).toBe(
+      expected.replace("- **Unit Ownership**: team", "- **Unit Ownership**: solo"),
+    );
+    expect(state(proj)).toContain("\n\n\n<!-- unrelated spacing -->");
+    expect(state(proj)).toContain("\n\n\n## Current Status");
+  });
+
+  test("cross-shard activity tied with a jump is outside the new team attempt", () => {
+    const proj = seedProject(
+      { ownership: "team", rhythm: "unit-end" },
+      ["alpha"],
+    );
+    const ts = "2026-08-20T00:00:00Z";
+    mkdirSync(seededAuditDir(proj), { recursive: true });
+    writeFileSync(
+      join(seededAuditDir(proj), "zzzz-activity.md"),
+      `## STAGE_AWAITING_APPROVAL\n**Timestamp**: ${ts}\n**Event**: STAGE_AWAITING_APPROVAL\n` +
+        "**Stage**: code-generation\n**Unit**: alpha\n**Gate Scope**: unit-end\n\n---\n",
+    );
+    writeFileSync(
+      join(seededAuditDir(proj), "aaaa-jump.md"),
+      `## STAGE_JUMPED\n**Timestamp**: ${ts}\n**Event**: STAGE_JUMPED\n` +
+        "**Stage**: functional-design\n**Direction**: redo\n\n---\n",
+    );
+    expect(runState(proj, ["set-unit-gate-rhythm", "per-stage"]).rc).toBe(0);
+  });
+
+  // Going back to change the Unit plan leaves each Unit's work with its team,
+  // so the teams' work before the jump still holds both settings; a new
+  // workflow starts over.
+  test("a jump back that keeps the teams' Unit work holds ownership and the rhythm as before it", () => {
+    const proj = seedProject({ ownership: "team" });
+    settleBody(proj, runNext(proj));
+    appendAuditEntry(
+      "STAGE_AWAITING_APPROVAL",
+      { Stage: "functional-design", Unit: "alpha", "Gate Scope": "per-stage", "Gate Stages": "functional-design" },
+      proj,
+    );
+    const jump = spawnSync(BUN, [ORCH, "next", "--stage", "units-generation", "--project-dir", proj], {
+      env: ENV,
+      encoding: "utf-8",
+      timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+    });
+    expect(jump.status, `${jump.stdout}${jump.stderr}`).toBe(0);
+    expect(readAllAuditShards(proj)).toContain("**Unit Work**: kept");
+    const before = state(proj);
+    expect(before).toContain("## Unit Progress");
+
+    const solo = runState(proj, ["set-unit-ownership", "solo"]);
+    expect(solo.rc, solo.out).not.toBe(0);
+    expect(solo.out).toContain(OWNERSHIP_STAYS);
+    const rhythm = runState(proj, ["set-unit-gate-rhythm", "unit-end"]);
+    expect(rhythm.rc, rhythm.out).not.toBe(0);
+    expect(rhythm.out).toContain(RHYTHM_STAYS_PER_STAGE);
+    expect(state(proj)).toBe(before);
+
+    appendAuditEntry("WORKFLOW_STARTED", { Scope: "feature" }, proj);
+    expect(runState(proj, ["set-unit-gate-rhythm", "unit-end"]).rc).toBe(0);
+    expect(runState(proj, ["set-unit-ownership", "solo"]).rc).toBe(0);
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("a switch after a Unit started and before its first gate takes effect at once, both ways", () => {
+    const toEnd = seedProject({ ownership: "team" });
+    settleBody(toEnd, runNext(toEnd));
+    const switched = runState(toEnd, ["set-unit-gate-rhythm", "unit-end"]);
+    expect(switched.rc, switched.out).toBe(0);
+    for (const stage of BLOCK.slice(1)) {
+      const body = runNext(toEnd);
+      expect(body).toMatchObject({ stage, unit: "alpha", gate: false });
+      settleBody(toEnd, body);
+    }
+    expect(runNext(toEnd)).toMatchObject({
+      stage: "code-generation",
+      unit: "alpha",
+      gate: true,
+      unit_gate: "unit-end",
+    });
+
+    const toEach = seedProject({ ownership: "team", rhythm: "unit-end" });
+    settleBody(toEach, runNext(toEach));
+    expect(runNext(toEach)).toMatchObject({ stage: "nfr-requirements", unit: "alpha", gate: false });
+    expect(runState(toEach, ["set-unit-gate-rhythm", "per-stage"]).rc).toBe(0);
+    expect(runNext(toEach)).toMatchObject({
+      stage: "functional-design",
+      unit: "alpha",
+      gate: true,
+      unit_gate: "per-stage",
+    });
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  // Live on Claude Code: the line came with the first Unit's step, whose first
+  // move started the Unit, and the lead's answer on the next turn was refused.
+  // The stage's own questions end that turn, so the answer comes before the
+  // first approval; that question opens with its report, before the person
+  // sees it, so an answer given at it is too late.
+  for (const scope of ["feature", "workshop"]) {
+    test(`the lead's yes to one approval per Unit, given in the first stage's question turn, is taken (${scope})`, () => {
+      const proj = seedProject({ ownership: "team", scope });
+      const session = "01995000-7a11-7000-8000-0000000324ab";
+      const chat: NodeJS.ProcessEnv = { ...ENV, AIDLC_SESSION_OVERRIDE: session, AIDLC_SESSION_OVERRIDE_SOURCE: "payload" };
+      const step = runNextWithEnv(proj, chat);
+      expect(step).toMatchObject({ kind: "run-stage", stage: "functional-design", unit: "alpha", gate: false });
+      expect(step.change_notices, JSON.stringify(step)).toContain(APPROVALS_LINE);
+      expect(runState(proj, ["unit", "start", "--stage", "functional-design", "--unit", "alpha"]).rc).toBe(0);
+      const question = spawnSync(BUN, [
+        LOG, "decision", "--stage", "functional-design", "--unit", "alpha",
+        "--decision", "Which entities does alpha own?", "--options", "A,B,X", "--project-dir", proj,
+      ], { env: ENV, encoding: "utf-8", timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS) });
+      expect(question.status, `${question.stdout}${question.stderr}`).toBe(0);
+      const said: NodeJS.ProcessEnv = { ...ENV, AIDLC_SESSION_OVERRIDE: session, AIDLC_UNATTENDED: "0" };
+      delete said.AIDLC_SESSION_OVERRIDE_SOURCE;
+      const reply = spawnSync(BUN, [join(AIDLC_SRC, "tools", "aidlc.ts"), "engine", "hook", "record-human-turn"], {
+        cwd: proj,
+        input: JSON.stringify({
+          hook_event_name: "UserPromptSubmit",
+          session_id: session,
+          prompt: "A is right. And once per Unit is fine",
+        }),
+        env: { ...said, CLAUDE_PROJECT_DIR: proj, AIDLC_PROJECT_DIR: proj },
+        encoding: "utf-8",
+        timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+      });
+      expect(reply.status, reply.stderr).toBe(0);
+
+      const once = runState(proj, ["set-unit-gate-rhythm", "unit-end"]);
+      expect(once.rc, once.out).toBe(0);
+      expect(readUnitGateRhythm(state(proj))).toBe("unit-end");
+      coverUnit(proj, "alpha", "functional-design");
+      expect(runState(proj, ["unit", "complete", "--stage", "functional-design", "--unit", "alpha"]).rc).toBe(0);
+      if (step.reviewer) logReviewReady(proj, "functional-design", "alpha", step.reviewer);
+      for (const stage of BLOCK.slice(1)) {
+        const body = runNext(proj);
+        expect(body).toMatchObject({ stage, unit: "alpha", gate: false });
+        settleBody(proj, body);
+      }
+      expect(runNext(proj)).toMatchObject({ stage: "code-generation", unit: "alpha", gate: true, unit_gate: "unit-end" });
+      expect(
+        runReport(proj, ["--stage", "code-generation", "--unit", "alpha", "--result", "awaiting-approval"]).kind,
+      ).toBe("print");
+      const before = state(proj);
+      const recorded = readAuditShardEvents(proj).filter((row) => row.event === "UNIT_GATE_RHYTHM_SET").length;
+      const late = runState(proj, ["set-unit-gate-rhythm", "per-stage"]);
+      expect(late.rc).not.toBe(0);
+      expect(late.out).toContain(
+        "The Units are already being approved once at the end of each Unit, so that stays for this work. " +
+          "Carry on with `/aidlc`.",
+      );
+      expect(state(proj)).toBe(before);
+      expect(readAuditShardEvents(proj).filter((row) => row.event === "UNIT_GATE_RHYTHM_SET").length).toBe(recorded);
+    }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+  }
+
+  for (const rhythm of ["per-stage", "unit-end"] as const) {
+    test(`after a Unit is approved to its end under ${rhythm}, the switch says it would ask for that Unit again`, () => {
+      const proj = seedProject({ ownership: "team", rhythm });
+      for (const _stage of BLOCK) {
+        const body = runNext(proj);
+        settleBody(proj, body);
+        if (rhythm === "per-stage") approveGate(proj, runNext(proj));
+      }
+      if (rhythm === "unit-end") approveGate(proj, runNext(proj));
+      expect(runNext(proj)).toMatchObject({ stage: "functional-design", unit: "beta", gate: false });
+      const before = state(proj);
+      const other = rhythm === "unit-end" ? "per-stage" : "unit-end";
+      const refused = runState(proj, ["set-unit-gate-rhythm", other]);
+      expect(refused.rc).not.toBe(0);
+      expect(refused.out).toContain(
+        rhythm === "unit-end"
+          ? "The Units are already being approved once at the end of each Unit, so that stays for this work: " +
+            "that would ask you again for the alpha Unit, which you approved once at its end. Carry on with `/aidlc`."
+          : "The Units are already being approved after every stage, so that stays for this work: " +
+            "that would ask you again for the alpha Unit, which you approved after every stage. Carry on with `/aidlc`.",
+      );
+      expect(state(proj)).toBe(before);
+      expect(runNext(proj)).toMatchObject({ stage: "functional-design", unit: "beta", gate: false });
+    }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+  }
+});
+
+describe("t324 doctor stage drift against the engine (#1190)", () => {
+  const driftFindings = (proj: string) => {
+    const stateContent = readFileSync(seededStateFile(proj), "utf-8");
+    const audit = readAllAuditShards(proj);
+    return runDiagnosis({
+      projectDir: proj,
+      timeline: reconstructTimeline(audit, stateContent),
+      stateContent,
+      audit,
+      graphStages: [],
+      recordAbsDir: null,
+      hooksHealth: { dirExists: true, heartbeats: [], degradedDrops: [] },
+      runtimeGraphExists: true,
+      markers: {
+        planExists: false,
+        planParseable: null,
+        stopHookDirExists: true,
+      },
+    }).filter(
+      (f) => f.id === "stage-state-audit-drift" || f.id === "current-stage-not-started",
+    );
+  };
+  const checkbox = (proj: string, slug: string) =>
+    parseCheckboxes(state(proj)).find((c) => c.slug === slug)?.state;
+
+  test("a team Unit projection that next resets to [ ] is not reported as drift", () => {
+    const proj = seedProject({ ownership: "team" });
+    appendAuditEntry("WORKFLOW_STARTED", { Scope: "feature" }, proj);
+    appendAuditEntry(
+      "STAGE_STARTED",
+      { Stage: "functional-design", Agent: "aidlc-architect-agent" },
+      proj,
+    );
+    runNext(proj);
+    // The precondition: the refresh really did rewrite the started stage's box.
+    expect(checkbox(proj, "functional-design")).toBe("pending");
+    expect(driftFindings(proj)).toEqual([]);
+  }, 60000);
+
+  test("report names a lost state write when the audit shows the stage started", () => {
+    const lostWrite = (withStart: boolean): Directive => {
+      const proj = seedProject({}, ["alpha"]);
+      let content = state(proj).replace(
+        "- **Current Stage**: functional-design",
+        "- **Current Stage**: build-and-test",
+      );
+      for (const slug of BLOCK) {
+        content = content.replace(new RegExp(`^- \\[[ -]\\] ${slug} `, "m"), `- [x] ${slug} `);
+      }
+      writeFileSync(seededStateFile(proj), content);
+      expect(checkbox(proj, "build-and-test")).toBe("pending");
+      appendAuditEntry("WORKFLOW_STARTED", { Scope: "feature" }, proj);
+      if (withStart) {
+        appendAuditEntry(
+          "STAGE_STARTED",
+          { Stage: "build-and-test", Agent: "aidlc-quality-agent" },
+          proj,
+        );
+      }
+      return runReport(proj, ["--stage", "build-and-test", "--result", "completed"]);
+    };
+
+    const lost = lostWrite(true);
+    expect(lost.kind).toBe("error");
+    expect(lost.message).toContain(
+      'Stage "build-and-test" shows as not started in aidlc-state.md, but the audit log shows it started',
+    );
+    expect(lost.message).toContain(" doctor` for the exact fix");
+
+    const unrun = lostWrite(false);
+    expect(unrun.kind).toBe("error");
+    expect(unrun.message).toBe(
+      'Stage "build-and-test" is still pending. Run the stage before reporting it complete.',
+    );
+  }, 60000);
+
+  test("scope-change skips the current team Unit stage when asked, and next routes past it", () => {
+    // bugfix skips functional-design. The person asked for that scope, so the
+    // change goes through with team ownership too, and next moves past the
+    // skipped stage the same way for team and solo work.
+    const scopeChange = (proj: string) =>
+      spawnSync(BUN, [UTIL, "scope-change", "--scope", "bugfix", "--project-dir", proj], {
+        encoding: "utf-8",
+        env: ENV,
+      });
+    for (const opts of [{ ownership: "team" }, {}]) {
+      const proj = seedProject(opts);
+      // The rebuild keys on the legend line an engine-created state carries.
+      writeFileSync(
+        seededStateFile(proj),
+        state(proj).replace(
+          "## Stage Progress\n",
+          "## Stage Progress\n<!-- Checkbox states: [ ] not started -->\n",
+        ),
+      );
+      const changed = scopeChange(proj);
+      expect(changed.status, `${changed.stdout}${changed.stderr}`).toBe(0);
+      expect(readAllAuditShards(proj)).toContain("SCOPE_CHANGED");
+      const recovery = runNext(proj);
+      expect(recovery.kind).toBe("print");
+      expect(recovery.message).toContain("--result skipped");
+    }
+  }, 60000);
+});
+
+describe("t324 scope-change Unit topology (#1401)", () => {
+  // A team-owned feature run whose later Unit gate waits while the cursor
+  // still reads functional-design: alpha's NFR Requirements gate is open.
+  function atLaterUnitGate(): string {
+    const proj = seedProject({ ownership: "team", rhythm: "per-stage" });
+    // Units Generation ran: the Units it made are the ones in the Unit DAG.
+    writeFileSync(seededStateFile(proj), state(proj).replace(
+      "## Stage Progress\n",
+      "## Stage Progress\n<!-- Checkbox states: [ ] not started -->\n\n### INCEPTION PHASE\n- [x] units-generation \u2014 EXECUTE\n",
+    ));
+    const first = runNext(proj);
+    settleBody(proj, first);
+    approveGate(proj, runNext(proj));
+    const later = runNext(proj);
+    expect(later).toMatchObject({ stage: "nfr-requirements", unit: "alpha", gate: false });
+    settleBody(proj, later);
+    const gate = runNext(proj);
+    expect(gate).toMatchObject({ stage: "nfr-requirements", unit: "alpha", unit_gate: "per-stage", gate: true });
+    expect(runReport(proj, [
+      "--stage", "nfr-requirements", "--unit", "alpha", "--result", "awaiting-approval",
+    ]).kind).toBe("print");
+    expect(state(proj)).toContain("- **Current Stage**: functional-design");
+    return proj;
+  }
+  const scopeChange = (proj: string, scope: string) => spawnSync(BUN, [
+    UTIL, "scope-change", "--scope", scope, "--project-dir", proj,
+  ], { encoding: "utf-8", env: ENV, timeout: NATIVE_STARTUP_TIMEOUT_MS });
+
+  test("feature to refactor at a later Unit gate goes through, names the dropped approval, and the Units carry on", () => {
+    const proj = atLaterUnitGate();
+    const changed = scopeChange(proj, "refactor");
+    expect(changed.status, changed.stdout + changed.stderr).toBe(0);
+    expect(changed.stdout).toContain("The alpha Unit's NFR Requirements approval is no longer part of the plan.");
+    expect(state(proj)).toContain("- **Scope**: refactor");
+    // On main this fell back to a stage-level step whose report needed a Unit
+    // (#1401). Now alpha carries on at the next stage refactor runs, per Unit.
+    const next = runNext(proj);
+    expect(next).toMatchObject({ kind: "run-stage", stage: "code-generation", unit: "alpha", gate: false });
+    expect((next.produces as string[])[0]).toContain("/construction/alpha/code-generation/");
+    settleBody(proj, next);
+    const gate = runNext(proj);
+    expect(gate).toMatchObject({ stage: "code-generation", unit: "alpha", unit_gate: "per-stage", gate: true });
+    approveGate(proj, gate);
+    expect(runNext(proj)).toMatchObject({ kind: "run-stage", stage: "functional-design", unit: "beta" });
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
+  test("a later Unit gate the new scope keeps is still asked after the switch", () => {
+    const proj = atLaterUnitGate();
+    const retained = scopeChange(proj, "mvp");
+    expect(retained.status, retained.stdout + retained.stderr).toBe(0);
+    expect(retained.stdout).not.toContain("no longer part of the plan");
+    const sameGate = runNext(proj);
+    expect(sameGate).toMatchObject({
+      stage: "nfr-requirements", unit: "alpha", unit_gate: "per-stage", gate: true,
+    });
+    approveGate(proj, sameGate);
+    expect(runNext(proj)).toMatchObject({ stage: "nfr-design", unit: "alpha", gate: false });
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+});
