@@ -7980,11 +7980,17 @@ function installedSourceCandidates(
       return [];
     }
   });
+  // Devin is this fork's own harness: it is listed after upstream's, so the
+  // numbers upstream's harnesses carry in the setup menu stay as they are.
+  const ordered = [
+    ...candidates.filter((candidate) => candidate.stamp.distribution !== "devin"),
+    ...candidates.filter((candidate) => candidate.stamp.distribution === "devin"),
+  ];
   return requiredVersion
-    ? candidates.filter((candidate) =>
+    ? ordered.filter((candidate) =>
         candidate.stamp.frameworkVersion === requiredVersion
       )
-    : candidates;
+    : ordered;
 }
 
 // No available source carries the harness this command needs: nothing is
