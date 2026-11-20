@@ -20,7 +20,7 @@
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -309,21 +309,80 @@ describe("Devin adapter on the wire", () => {
 });
 
 describe("project hooks find Bun on a Devin Cloud VM", () => {
-  test("every hook looks in ~/.bun/bin, and session start can install Bun", () => {
-    const hooks = JSON.parse(readFileSync(join(DEVIN_DIST, ".devin", "hooks.v1.json"), "utf-8")) as Record<
-      string,
-      Array<{ hooks: Array<{ command: string }> }>
-    >;
-    for (const [event, groups] of Object.entries(hooks)) {
-      for (const command of groups.flatMap((group) => group.hooks.map((h) => h.command))) {
-        // A hook shell on Devin Cloud does not read ~/.bashrc, where Bun's
-        // installer puts ~/.bun/bin on PATH.
-        expect(command, event).toContain('PATH="$HOME/.bun/bin:$PATH"');
-      }
+  type HookFile = Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+  const commands = (file: string) =>
+    Object.entries(JSON.parse(readFileSync(file, "utf-8")) as HookFile).flatMap(([event, groups]) =>
+      groups.flatMap((group) => group.hooks.map((h) => [event, h.command] as const)),
+    );
+  const fakeHome = () => {
+    const home = mkdtempSync(join(tmpdir(), "aidlc-devin-vm-"));
+    const repo = join(home, "repos", "app");
+    mkdirSync(repo, { recursive: true });
+    return { home, repo };
+  };
+  // A PATH with the shell basics and no Bun, as on a fresh Devin Cloud VM.
+  const bareBin = (home: string) => {
+    const bin = join(home, "bin");
+    mkdirSync(bin);
+    for (const tool of ["sh", "grep", "mkdir", "rmdir", "sleep", "cat", "bash"]) {
+      const found = spawnSync("sh", ["-c", `command -v ${tool}`], { encoding: "utf-8" }).stdout.trim();
+      if (found) cpSync(found, join(bin, tool));
     }
-    const start = hooks.SessionStart[0].hooks[0].command;
-    expect(start).toContain("curl -fsSL https://bun.sh/install | bash");
-    expect(start).toContain('"$HOME"/repos/*');
+    return bin;
+  };
+
+  test("every hook looks in ~/.bun/bin and can install Bun on the VM", () => {
+    for (const [event, command] of commands(join(DEVIN_DIST, ".devin", "hooks.v1.json"))) {
+      // A hook shell on Devin Cloud does not read ~/.bashrc, where Bun's
+      // installer puts ~/.bun/bin on PATH, and session start runs in the
+      // background, so any hook may be the first to need Bun.
+      expect(command, event).toContain('PATH="$HOME/.bun/bin:$PATH"');
+      expect(command, event).toContain("curl -fsSL https://bun.sh/install | bash");
+      expect(command, event).toContain('"$HOME"/repos/*');
+    }
+  });
+
+  test("a hook finds Bun in ~/.bun/bin, and stays quiet without it", () => {
+    const [, guards] = commands(join(DEVIN_DIST, ".devin", "hooks.v1.json")).find(([e]) => e === "PreToolUse")!;
+    const { home, repo } = fakeHome();
+    try {
+      const bin = bareBin(home);
+      // Outside ~/repos (a local machine) nothing is installed and the hook
+      // is a quiet no-op instead of "bun: command not found".
+      const local = spawnSync("sh", ["-c", guards], {
+        env: { HOME: home, PATH: bin, DEVIN_PROJECT_DIR: join(home, "elsewhere") },
+        input: "{}",
+        encoding: "utf-8",
+      });
+      expect(local.status, local.stderr).toBe(0);
+      expect(local.stderr).toBe("");
+      expect(existsSync(join(home, ".aidlc-bun-install"))).toBe(false);
+
+      // Bun installed under ~/.bun/bin (by another hook, or the blueprint).
+      mkdirSync(join(home, ".bun", "bin"), { recursive: true });
+      const fake = join(home, ".bun", "bin", "bun");
+      writeFileSync(fake, '#!/bin/sh\necho "ran $2"\n');
+      chmodSync(fake, 0o755);
+      const ran = spawnSync("sh", ["-c", guards], {
+        env: { HOME: home, PATH: bin, DEVIN_PROJECT_DIR: repo },
+        input: "{}",
+        encoding: "utf-8",
+      });
+      expect(ran.status, ran.stderr).toBe(0);
+      expect(ran.stdout.trim()).toBe("ran guards");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a native install's hooks never install Bun", () => {
+    const native = join(REPO_ROOT, "dist-release", "devin", ".devin", "hooks.v1.json");
+    if (!existsSync(native)) return;
+    for (const [event, command] of commands(native)) {
+      expect(command, event).toContain("exec aidlc engine adapter devin");
+      // Its own hooks name the native route, so the Bun step is skipped.
+      expect(readFileSync(native, "utf-8")).toMatch(/engine adapter devin /);
+    }
   });
 });
 

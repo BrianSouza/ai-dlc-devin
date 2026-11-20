@@ -93,8 +93,8 @@ Devin CLI / Devin Desktop: start `devin` in this folder, then type
   /aidlc <what you want to build>
 
 Devin Cloud: commit and push .devin/, aidlc/, AGENTS.md and .gitignore and
-give Devin access to this repository. AI-DLC installs Bun on the cloud VM at
-session start; to have it from the first moment, add to the environment
+give Devin access to this repository. AI-DLC's hooks install Bun on the
+cloud VM the first time they run; to skip that wait, add to the environment
 blueprint:
   initialize: |
     curl -fsSL https://bun.sh/install | bash

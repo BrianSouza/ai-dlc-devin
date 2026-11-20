@@ -40,8 +40,8 @@ the install committed in your repository. After the install command:
 2. In Devin, *Settings → Repositories*, give Devin access to the project
    repository (and to this one, while it is private).
 3. Optional: add Bun to the repository's environment blueprint. Without it,
-   AI-DLC's session-start hook installs Bun on the cloud VM, and the hooks of
-   the session's first moments may run before it is ready.
+   AI-DLC's first hook installs Bun on the cloud VM, which adds a few seconds
+   at the start of each session.
 
    ```yaml
    initialize: |

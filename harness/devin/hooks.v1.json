@@ -5,7 +5,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "sh -c 'command -v bun >/dev/null 2>&1 || [ -x \"$HOME/.bun/bin/bun\" ] || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) grep -q aidlc-devin-adapter.ts \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null && curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 ;; esac; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-start'",
+          "command": "sh -c '[ -x \"$HOME/.bun/bin/bun\" ] || command -v bun >/dev/null 2>&1 || grep -q \"engine adapter devi[n]\" \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) if mkdir \"$HOME/.aidlc-bun-install\" 2>/dev/null; then curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1; rmdir \"$HOME/.aidlc-bun-install\"; else i=0; while [ ! -x \"$HOME/.bun/bin/bun\" ] && [ -d \"$HOME/.aidlc-bun-install\" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; fi ;; esac; PATH=\"$HOME/.bun/bin:$PATH\"; command -v bun >/dev/null 2>&1 || exit 0; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-start'",
           "timeout": 1800
         }
       ]
@@ -17,7 +17,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-end",
+          "command": "sh -c '[ -x \"$HOME/.bun/bin/bun\" ] || command -v bun >/dev/null 2>&1 || grep -q \"engine adapter devi[n]\" \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) if mkdir \"$HOME/.aidlc-bun-install\" 2>/dev/null; then curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1; rmdir \"$HOME/.aidlc-bun-install\"; else i=0; while [ ! -x \"$HOME/.bun/bin/bun\" ] && [ -d \"$HOME/.aidlc-bun-install\" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; fi ;; esac; PATH=\"$HOME/.bun/bin:$PATH\"; command -v bun >/dev/null 2>&1 || exit 0; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-end'",
           "timeout": 60
         }
       ]
@@ -29,7 +29,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" mint",
+          "command": "sh -c '[ -x \"$HOME/.bun/bin/bun\" ] || command -v bun >/dev/null 2>&1 || grep -q \"engine adapter devi[n]\" \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) if mkdir \"$HOME/.aidlc-bun-install\" 2>/dev/null; then curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1; rmdir \"$HOME/.aidlc-bun-install\"; else i=0; while [ ! -x \"$HOME/.bun/bin/bun\" ] && [ -d \"$HOME/.aidlc-bun-install\" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; fi ;; esac; PATH=\"$HOME/.bun/bin:$PATH\"; command -v bun >/dev/null 2>&1 || exit 0; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" mint'",
           "timeout": 1800
         }
       ]
@@ -41,7 +41,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" guards",
+          "command": "sh -c '[ -x \"$HOME/.bun/bin/bun\" ] || command -v bun >/dev/null 2>&1 || grep -q \"engine adapter devi[n]\" \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) if mkdir \"$HOME/.aidlc-bun-install\" 2>/dev/null; then curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1; rmdir \"$HOME/.aidlc-bun-install\"; else i=0; while [ ! -x \"$HOME/.bun/bin/bun\" ] && [ -d \"$HOME/.aidlc-bun-install\" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; fi ;; esac; PATH=\"$HOME/.bun/bin:$PATH\"; command -v bun >/dev/null 2>&1 || exit 0; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" guards'",
           "timeout": 1800
         }
       ]
@@ -53,7 +53,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" audit-and-sensors",
+          "command": "sh -c '[ -x \"$HOME/.bun/bin/bun\" ] || command -v bun >/dev/null 2>&1 || grep -q \"engine adapter devi[n]\" \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) if mkdir \"$HOME/.aidlc-bun-install\" 2>/dev/null; then curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1; rmdir \"$HOME/.aidlc-bun-install\"; else i=0; while [ ! -x \"$HOME/.bun/bin/bun\" ] && [ -d \"$HOME/.aidlc-bun-install\" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; fi ;; esac; PATH=\"$HOME/.bun/bin:$PATH\"; command -v bun >/dev/null 2>&1 || exit 0; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" audit-and-sensors'",
           "timeout": 3600
         }
       ]
@@ -63,7 +63,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" runtime-compile",
+          "command": "sh -c '[ -x \"$HOME/.bun/bin/bun\" ] || command -v bun >/dev/null 2>&1 || grep -q \"engine adapter devi[n]\" \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) if mkdir \"$HOME/.aidlc-bun-install\" 2>/dev/null; then curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1; rmdir \"$HOME/.aidlc-bun-install\"; else i=0; while [ ! -x \"$HOME/.bun/bin/bun\" ] && [ -d \"$HOME/.aidlc-bun-install\" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; fi ;; esac; PATH=\"$HOME/.bun/bin:$PATH\"; command -v bun >/dev/null 2>&1 || exit 0; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" runtime-compile'",
           "timeout": 1800
         }
       ]
@@ -75,7 +75,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" validate-state",
+          "command": "sh -c '[ -x \"$HOME/.bun/bin/bun\" ] || command -v bun >/dev/null 2>&1 || grep -q \"engine adapter devi[n]\" \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) if mkdir \"$HOME/.aidlc-bun-install\" 2>/dev/null; then curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1; rmdir \"$HOME/.aidlc-bun-install\"; else i=0; while [ ! -x \"$HOME/.bun/bin/bun\" ] && [ -d \"$HOME/.aidlc-bun-install\" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; fi ;; esac; PATH=\"$HOME/.bun/bin:$PATH\"; command -v bun >/dev/null 2>&1 || exit 0; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" validate-state'",
           "timeout": 1800
         }
       ]
@@ -87,7 +87,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" stop",
+          "command": "sh -c '[ -x \"$HOME/.bun/bin/bun\" ] || command -v bun >/dev/null 2>&1 || grep -q \"engine adapter devi[n]\" \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) if mkdir \"$HOME/.aidlc-bun-install\" 2>/dev/null; then curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1; rmdir \"$HOME/.aidlc-bun-install\"; else i=0; while [ ! -x \"$HOME/.bun/bin/bun\" ] && [ -d \"$HOME/.aidlc-bun-install\" ] && [ $i -lt 180 ]; do sleep 1; i=$((i+1)); done; fi ;; esac; PATH=\"$HOME/.bun/bin:$PATH\"; command -v bun >/dev/null 2>&1 || exit 0; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" stop'",
           "timeout": 3600
         }
       ]

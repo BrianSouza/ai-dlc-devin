@@ -154,12 +154,13 @@ in this repository, `harness/devin/cloud-plugin/` (`aidlc-devin`):
    `.gitignore` and push. A cloud session only sees what the repository holds.
 2. **Give Devin the repository.** In Devin, *Settings → Repositories*, grant
    access to the project repository and to this fork (the plugin's source).
-3. **Bun.** A cloud VM starts without Bun. AI-DLC's session-start hook
-   installs it (into `~/.bun`) when the session's project is a cloned
-   repository under `~/repos/`, and every hook looks for it in `~/.bun/bin`,
-   because a hook's shell does not read `~/.bashrc`. The hooks of the
-   session's first moments can run before that install finishes and are then
-   skipped; to have Bun from the start, add it to the repository's environment
+3. **Bun.** A cloud VM starts without Bun. The first AI-DLC hook that runs
+   installs it (into `~/.bun`, once, while the others wait) when the
+   session's project is a cloned repository under `~/repos/`, and every hook
+   looks for it in `~/.bun/bin`, because a hook's shell does not read
+   `~/.bashrc`. Where Bun cannot be installed, the hooks do nothing instead of
+   failing. Installing it takes a few seconds at the start of each session; to
+   have Bun from the start, add it to the repository's environment
    blueprint ([Devin environment setup](https://docs.devin.ai/onboard-devin/environment);
    Devin can also write it for you):
 
