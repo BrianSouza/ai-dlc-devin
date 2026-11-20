@@ -1273,8 +1273,9 @@ describe("t221 (c) harness registration and protocol prose", () => {
       expect(
         pre.some((group) =>
           group.hooks.some((h) =>
+            // The command is an `sh -c '...'` launcher that finds Bun first.
             h.command.endsWith(
-              `bun "$DEVIN_PROJECT_DIR/${harness.manifest.harnessDir}/hooks/aidlc-devin-adapter.ts" guards`,
+              `bun "$DEVIN_PROJECT_DIR/${harness.manifest.harnessDir}/hooks/aidlc-devin-adapter.ts" guards'`,
             )
           )
         ),
