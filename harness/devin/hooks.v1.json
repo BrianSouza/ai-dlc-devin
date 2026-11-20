@@ -3,7 +3,11 @@
     {
       "matcher": "",
       "hooks": [
-        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-start", "timeout": 1800 }
+        {
+          "type": "command",
+          "command": "sh -c 'command -v bun >/dev/null 2>&1 || [ -x \"$HOME/.bun/bin/bun\" ] || { case \"$DEVIN_PROJECT_DIR\" in \"$HOME\"/repos/*) grep -q aidlc-devin-adapter.ts \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks.v1.json\" 2>/dev/null && curl -fsSL https://bun.sh/install | bash >/dev/null 2>&1 ;; esac; }; PATH=\"$HOME/.bun/bin:$PATH\" exec bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-start'",
+          "timeout": 1800
+        }
       ]
     }
   ],
@@ -11,7 +15,11 @@
     {
       "matcher": "",
       "hooks": [
-        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-end", "timeout": 60 }
+        {
+          "type": "command",
+          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" session-end",
+          "timeout": 60
+        }
       ]
     }
   ],
@@ -19,7 +27,11 @@
     {
       "matcher": "",
       "hooks": [
-        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" mint", "timeout": 1800 }
+        {
+          "type": "command",
+          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" mint",
+          "timeout": 1800
+        }
       ]
     }
   ],
@@ -27,7 +39,11 @@
     {
       "matcher": "^(exec|read|write|edit|apply_patch|notebook_read|notebook_edit|grep|glob|run_subagent|ask_user_question)$",
       "hooks": [
-        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" guards", "timeout": 1800 }
+        {
+          "type": "command",
+          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" guards",
+          "timeout": 1800
+        }
       ]
     }
   ],
@@ -35,13 +51,21 @@
     {
       "matcher": "^(write|edit|apply_patch|notebook_edit|run_subagent)$",
       "hooks": [
-        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" audit-and-sensors", "timeout": 3600 }
+        {
+          "type": "command",
+          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" audit-and-sensors",
+          "timeout": 3600
+        }
       ]
     },
     {
       "matcher": "^exec$",
       "hooks": [
-        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" runtime-compile", "timeout": 1800 }
+        {
+          "type": "command",
+          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" runtime-compile",
+          "timeout": 1800
+        }
       ]
     }
   ],
@@ -49,7 +73,11 @@
     {
       "matcher": "",
       "hooks": [
-        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" validate-state", "timeout": 1800 }
+        {
+          "type": "command",
+          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" validate-state",
+          "timeout": 1800
+        }
       ]
     }
   ],
@@ -57,7 +85,11 @@
     {
       "matcher": "",
       "hooks": [
-        { "type": "command", "command": "bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" stop", "timeout": 3600 }
+        {
+          "type": "command",
+          "command": "PATH=\"$HOME/.bun/bin:$PATH\" bun \"$DEVIN_PROJECT_DIR/{{HARNESS_DIR}}/hooks/aidlc-devin-adapter.ts\" stop",
+          "timeout": 3600
+        }
       ]
     }
   ]
