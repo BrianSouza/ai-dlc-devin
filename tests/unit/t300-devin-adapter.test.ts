@@ -308,6 +308,25 @@ describe("Devin adapter on the wire", () => {
   });
 });
 
+describe("project hooks find Bun on a Devin Cloud VM", () => {
+  test("every hook looks in ~/.bun/bin, and session start can install Bun", () => {
+    const hooks = JSON.parse(readFileSync(join(DEVIN_DIST, ".devin", "hooks.v1.json"), "utf-8")) as Record<
+      string,
+      Array<{ hooks: Array<{ command: string }> }>
+    >;
+    for (const [event, groups] of Object.entries(hooks)) {
+      for (const command of groups.flatMap((group) => group.hooks.map((h) => h.command))) {
+        // A hook shell on Devin Cloud does not read ~/.bashrc, where Bun's
+        // installer puts ~/.bun/bin on PATH.
+        expect(command, event).toContain('PATH="$HOME/.bun/bin:$PATH"');
+      }
+    }
+    const start = hooks.SessionStart[0].hooks[0].command;
+    expect(start).toContain("curl -fsSL https://bun.sh/install | bash");
+    expect(start).toContain('"$HOME"/repos/*');
+  });
+});
+
 describe("aidlc-devin cloud plugin", () => {
   const PLUGIN = join(REPO_ROOT, "harness", "devin", "cloud-plugin");
   type Hooks = Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string }> }>>;
