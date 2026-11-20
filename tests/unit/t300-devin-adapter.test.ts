@@ -10,6 +10,11 @@
 //   - run_subagent opens the identity ledger, so a call from another session
 //     is attributed to the subagent while it runs; PostToolUse closes it.
 //   - write/apply_patch PostToolUse feed the audit (ARTIFACT_*).
+//   - an event delivered twice (project hooks and the cloud plugin) is
+//     answered once: the duplicate replays the first answer.
+//   - the aidlc-devin cloud plugin loads only in cloud sessions, wires the
+//     same targets as .devin/hooks.v1.json, and its launcher finds the install
+//     under ~/repos/<repo> and runs its adapter.
 //
 // covers: hook:aidlc-state-transition-guard, hook:aidlc-write-audit-log
 
@@ -66,6 +71,22 @@ describe("normalizeDevinPayload", () => {
     expect(out.tool_input?.subagent_type).toBe("aidlc-quality-agent");
     expect(out.tool_input?.prompt).toBe("run the tests");
     expect(out.tool_use_id).toBe("p1:aidlc-quality-agent");
+  });
+
+  test("a general-profile dispatch is attributed to the persona its brief names", () => {
+    const out = normalizeDevinPayload({
+      tool_name: "run_subagent",
+      tool_input: {
+        profile: "subagent_general",
+        task: "AIDLC persona: aidlc-architecture-reviewer-agent\n\nReview the design.",
+      },
+    });
+    expect(out.tool_input?.subagent_type).toBe("aidlc-architecture-reviewer-agent");
+    const named = normalizeDevinPayload({
+      tool_name: "run_subagent",
+      tool_input: { profile: "aidlc-developer-agent", task: "AIDLC persona: aidlc-quality-agent" },
+    });
+    expect(named.tool_input?.subagent_type).toBe("aidlc-developer-agent");
   });
 });
 
@@ -247,5 +268,106 @@ describe("Devin adapter on the wire", () => {
     });
     const after = (audit().match(/ARTIFACT_(CREATED|UPDATED)/g) ?? []).length;
     expect(after - before).toBe(2);
+
+    // The same event delivered a second time (both registrations) records nothing more.
+    hook("audit-and-sensors", {
+      hook_event_name: "PostToolUse",
+      session_id: "main-1",
+      prompt_id: "p4",
+      tool_name: "write",
+      tool_input: { file_path: relFromProject, content: "# Requirements\n" },
+      tool_response: { success: true, output: "", error: null },
+    });
+    expect((audit().match(/ARTIFACT_(CREATED|UPDATED)/g) ?? []).length).toBe(after);
+  });
+
+  test("a duplicate guard delivery replays the first refusal", () => {
+    const dispatch = {
+      hook_event_name: "PreToolUse",
+      session_id: "main-1",
+      prompt_id: "p5",
+      tool_name: "run_subagent",
+      tool_input: { profile: "aidlc-developer-agent", task: "scan again" },
+    };
+    expect(hook("guards", dispatch).stdout).toBe("");
+    const routed = {
+      hook_event_name: "PreToolUse",
+      session_id: "sub-2",
+      prompt_id: "q5",
+      tool_name: "exec",
+      tool_input: { command: "bun .devin/tools/aidlc.ts engine orchestrate next" },
+    };
+    const first = hook("guards", routed).stdout;
+    expect(first).toContain('"decision":"block"');
+    expect(hook("guards", routed).stdout).toBe(first);
+    hook("audit-and-sensors", {
+      ...dispatch,
+      hook_event_name: "PostToolUse",
+      tool_response: { success: true, output: "done", error: null },
+    });
+  });
+});
+
+describe("aidlc-devin cloud plugin", () => {
+  const PLUGIN = join(REPO_ROOT, "harness", "devin", "cloud-plugin");
+  type Hooks = Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string }> }>>;
+  const targetsOf = (hooks: Hooks) =>
+    Object.fromEntries(
+      Object.entries(hooks).map(([event, groups]) => [
+        event,
+        groups.flatMap((group) =>
+          group.hooks.map((h) => `${group.matcher ?? ""} ${/\b(?:T=|aidlc-devin-adapter\.ts["]? )([a-z-]+)/.exec(h.command)?.[1]}`)
+        ).sort(),
+      ]),
+    );
+
+  test("loads only in cloud sessions and wires the same targets as the project's hooks", () => {
+    const manifest = JSON.parse(readFileSync(join(PLUGIN, ".devin-plugin", "plugin.json"), "utf-8")) as {
+      name: string;
+      platforms: string[];
+    };
+    expect(manifest.name).toBe("aidlc-devin");
+    expect(manifest.platforms).toEqual(["cloud"]);
+    const cloud = JSON.parse(readFileSync(join(PLUGIN, "hooks.json"), "utf-8")) as Hooks;
+    const project = JSON.parse(readFileSync(join(REPO_ROOT, "harness", "devin", "hooks.v1.json"), "utf-8")) as Hooks;
+    const projectTargets = targetsOf(project);
+    // Cloud sessions fire no SessionEnd, so the plugin registers none.
+    delete projectTargets.SessionEnd;
+    expect(targetsOf(cloud)).toEqual(projectTargets);
+    expect(existsSync(join(PLUGIN, "skills", "aidlc", "SKILL.md"))).toBe(true);
+    expect(readFileSync(join(PLUGIN, "AGENTS.md"), "utf-8")).toContain(".devin/rules/aidlc-method.md");
+  });
+
+  test("its launcher finds the install under ~/repos and runs the adapter, and stays quiet elsewhere", () => {
+    const cloud = JSON.parse(readFileSync(join(PLUGIN, "hooks.json"), "utf-8")) as Hooks;
+    const command = cloud.SessionStart[0].hooks[0].command;
+    const home = mkdtempSync(join(tmpdir(), "aidlc-devin-cloud-home-"));
+    try {
+      const repo = join(home, "repos", "app");
+      mkdirSync(repo, { recursive: true });
+      cpSync(DEVIN_DIST, repo, { recursive: true });
+      spawnSync("git", ["init", "-q"], { cwd: repo });
+      const env: Record<string, string> = { HOME: home, PATH: process.env.PATH ?? "" };
+      const started = spawnSync("sh", ["-c", command], {
+        cwd: tmpdir(),
+        env,
+        input: JSON.stringify({ hook_event_name: "SessionStart", source: "startup", session_id: "cloud-1" }),
+        encoding: "utf-8",
+      });
+      expect(started.status, started.stderr).toBe(0);
+      expect(started.stdout).toContain('"hookEventName":"SessionStart"');
+      expect(started.stdout).toContain("cloud-1");
+
+      const elsewhere = spawnSync("sh", ["-c", command], {
+        cwd: tmpdir(),
+        env: { HOME: join(home, "nowhere"), PATH: process.env.PATH ?? "" },
+        input: "{}",
+        encoding: "utf-8",
+      });
+      expect(elsewhere.status).toBe(0);
+      expect(elsewhere.stdout).toBe("");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

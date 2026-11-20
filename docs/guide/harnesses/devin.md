@@ -107,9 +107,8 @@ Type `/hooks` in Devin to confirm `.devin/hooks.v1.json` is loaded.
   `"read_config_from": { "claude": false }` in `~/.config/devin/config.json` so
   AI-DLC's hooks do not run twice. `doctor` warns when it sees a `.claude/`
   install next to `.devin/`.
-- **Devin Cloud** is not a verified target: cloud sessions take hooks through
-  Devin plugins and fire no `SessionEnd`. Run workflows in Devin CLI or Devin
-  Desktop; `/handoff` can still send finished work to a cloud session.
+- **Devin Cloud** runs AI-DLC through the `aidlc-devin` cloud plugin; see
+  [Devin Cloud](#devin-cloud) below for what changes there.
 - **Plugins** — the packager emits a generic store-kind plugin projection for
   Devin (`dist/plugins/.devin-plugin/`); it has not been checked against
   Devin's own plugin format.
@@ -118,6 +117,86 @@ Type `/hooks` in Devin to confirm `.devin/hooks.v1.json` is loaded.
   persona's read instructions, as on Cursor. Devin's `PreToolUse` can rewrite a
   tool's input (`updatedInput`), so wiring the core `deliver-stage-rules` hook
   for `run_subagent` (as Codex and Copilot do) is a possible follow-up.
+
+## Devin Cloud
+
+Devin Cloud sessions (the web app, Slack, automations, `devin --cloud`) are
+not the Devin CLI on a VM: they run Devin's cloud agent, which reads a
+repository's `AGENTS.md` and skills but takes hooks only from **plugins**, and
+loads no custom subagent profiles. AI-DLC reaches them through a small plugin
+in this repository, `harness/devin/cloud-plugin/` (`aidlc-devin`):
+
+- it loads **only in cloud sessions** (`"platforms": ["cloud"]`), so Devin CLI
+  and Devin Desktop keep using the project's own `.devin/` files and nothing
+  runs twice;
+- it carries no copy of AI-DLC: its `hooks.json` runs the adapter of the
+  AI-DLC install committed in the cloned repository, its `aidlc` skill hands
+  over to that install's `/aidlc` conductor skill, and its `AGENTS.md` points
+  the session at the install's method rule.
+
+### Install for Devin Cloud
+
+1. **Commit the install to the project.** Install AI-DLC in the project as in
+   [Install (manual copy)](#install-manual-copy), then commit `.devin/`,
+   `aidlc/`, `AGENTS.md` and `.gitignore` and push. A cloud session only sees
+   what the repository holds.
+2. **Give Devin the repository.** In Devin, *Settings → Repositories*, grant
+   access to the project repository and to this fork (the plugin's source).
+3. **Add Bun to the environment.** In the repository's environment blueprint
+   ([Devin environment setup](https://docs.devin.ai/onboard-devin/environment);
+   Devin can also write it for you), install Bun:
+
+   ```yaml
+   initialize: |
+     curl -fsSL https://bun.sh/install | bash
+   ```
+
+   Without Bun the plugin's session-start hook tells the agent to ask for it,
+   and AI-DLC's hooks do not run.
+4. **Install the plugin**, either way:
+   - *Customize → Plugins → Add plugin → From repository*: `BrianSouza/ai-dlc-devin`,
+     subdirectory `harness/devin/cloud-plugin`, at your personal or
+     organization scope; or
+   - declare it in the project's `.devin/config.json`, so every cloud session
+     of that repository installs it:
+
+     ```json
+     {
+       "requiredPlugins": [
+         {
+           "source": "git-subdir",
+           "url": "https://github.com/BrianSouza/ai-dlc-devin.git",
+           "path": "harness/devin/cloud-plugin"
+         }
+       ]
+     }
+     ```
+
+     Keep the `permissions` block the install wrote in that file.
+5. **Start a cloud session** on the repository and type
+   `@skills:aidlc Build a REST API for inventory management` (or
+   `/aidlc-devin:aidlc ...` from `devin --cloud`).
+
+### What differs in the cloud
+
+- **Hooks are best effort.** Devin runs plugin hooks fail-open: if one fails
+  to load or run, the session carries on without it. AI-DLC's guards can then
+  not stop a call, and the conductor keeps to the step the engine gives it.
+  The SessionStart hook runs in the background (its context arrives on the
+  next turn) and there is no SessionEnd.
+- **Approval gates** still need your own message: answer each question in the
+  chat. If the UserPromptSubmit hook does not run, a gate refuses the approval
+  rather than assuming it.
+- **Subagents.** Cloud sessions load no custom subagent profiles, so the
+  conductor sends an AI-DLC agent as Devin's general subagent with
+  `AIDLC persona: <agent>` and the persona at the top of the brief; the hooks
+  read the agent from that line.
+- **One install per session.** The plugin's hooks act on the first cloned
+  repository that carries `.devin/hooks.v1.json` (under `~/repos/`); keep one
+  AI-DLC repository per cloud session.
+- **Duplicate events.** If a cloud session also reads the project's
+  `.devin/hooks.v1.json`, each event reaches the adapter twice; the adapter
+  answers the first and replays that answer for the second.
 
 ## Verification status
 
@@ -133,8 +212,13 @@ Verified in this fork without a live Devin session:
   `apply_patch`.
 - `bun .devin/tools/aidlc.ts doctor` on a fresh install, and the engine's
   first steps (`next` → `intent create` → `next`).
+- The cloud plugin: its targets match `.devin/hooks.v1.json`, it loads only in
+  cloud sessions, its launcher finds an install under `~/repos/<repo>` and runs
+  the adapter (and stays silent with no install), duplicate deliveries replay
+  one answer, and a general-profile dispatch is attributed to the persona its
+  brief names (`t300`).
 
-Not yet verified: a live Devin CLI run. Devin documents tool names and payload
+Not yet verified: a live Devin CLI run, and a live Devin Cloud session. Devin documents tool names and payload
 shapes but not every `tool_input` field (for example `run_subagent`'s and
 `edit`'s argument names); the adapter accepts the likely spellings
 (`profile`/`subagent_type`, `path`/`file_path`, ...). Capture real payloads

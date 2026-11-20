@@ -35,7 +35,7 @@ This is the same AI-DLC core that ships to every harness: the same ordered steps
 - Subagent identity on hook payloads is **reconstructed by the adapter** (Devin sends no per-subagent identity): reviewer read-scope enforcement keys on the dispatch ledger the adapter keeps.
 - There is **no statusline** and **no welcome message**; use \`/aidlc-status\` (or \`/aidlc --status\`) and the progress lines at gates.
 - Construction swarm runs as **subagent fan-out only** (\`AIDLC_USE_SWARM=1\` is a loud no-op).
-- **Devin Cloud** is not a verified target of this port: cloud sessions take hooks through Devin plugins and fire no SessionEnd, so run AI-DLC workflows in Devin CLI or Devin Desktop (hand finished work to the cloud with \`/handoff\` if you like).
+- **Devin Cloud** sessions run AI-DLC through the \`aidlc-devin\` cloud plugin (hooks there are best effort, and agents run as Devin's general subagent with their persona in the brief); the harness guide's Devin Cloud section has the install.
 - **MCP servers**: none ship (configure your own in \`.devin/mcp_config.json\` if needed).
 `,
 

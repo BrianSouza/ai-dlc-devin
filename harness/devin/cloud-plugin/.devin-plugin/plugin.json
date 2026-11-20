@@ -1,0 +1,8 @@
+{
+  "name": "aidlc-devin",
+  "version": "1.0.0",
+  "description": "Runs AI-DLC in Devin Cloud sessions for repositories that carry an AI-DLC Devin install (.devin/): its hooks, the aidlc skill and the standing rule.",
+  "license": "MIT-0",
+  "keywords": ["aidlc", "ai-dlc", "workflow", "devin"],
+  "platforms": ["cloud"]
+}
