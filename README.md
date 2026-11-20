@@ -2,16 +2,74 @@
 
 > **This is a fork of [awslabs/aidlc-workflows](https://github.com/awslabs/aidlc-workflows)
 > that adds a [Devin](https://docs.devin.ai) harness** (Devin CLI, Devin
-> Desktop and, through a cloud plugin, Devin Cloud). Install it in a project
-> with one command:
->
-> ```bash
-> curl -fsSL https://raw.githubusercontent.com/BrianSouza/ai-dlc-devin/main/scripts/install-devin.sh | sh
-> ```
->
-> See [AI-DLC on Devin](docs/guide/harnesses/devin.md) for what it does and what
-> differs. Everything else tracks upstream; the
-> upstream installer and release files below do not include the Devin runtime.
+> Desktop and, through a cloud plugin, Devin Cloud). See
+> [AI-DLC on Devin](#ai-dlc-on-devin) below for how to install and run it in
+> each Devin scenario. Everything else tracks upstream; the upstream installer
+> and release files further down do not include the Devin runtime.
+
+## AI-DLC on Devin
+
+One command installs AI-DLC into a project. Run it in the project folder (a
+git repository); it works on macOS, Linux and WSL:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BrianSouza/ai-dlc-devin/main/scripts/install-devin.sh | sh
+```
+
+It installs Bun when missing, downloads this repository, builds the Devin
+runtime and runs `aidlc config --harness devin`. That adds AI-DLC's block to
+`AGENTS.md` and `.gitignore` without touching your own lines, keeps your
+`.devin/config.json` settings and any AI-DLC work already in `aidlc/`, and
+ends with `doctor`. Run the same command again to update.
+
+| Scenario | Install | Run |
+|----------|---------|-----|
+| **Devin CLI** on your computer | The command above, in the project folder | `devin` in that folder, then `/aidlc --doctor` and `/aidlc <what to build>` |
+| **Devin Desktop** | The command above, in the project folder | Open the folder in Devin Desktop, then `/aidlc <what to build>` |
+| **Devin Cloud** (web app, Slack, automations, `devin --cloud`) | The command above, then the [cloud steps](#devin-cloud) | `@skills:aidlc <what to build>` in a session on the repository |
+| **Devin CLI on a cloud VM** (EC2, Codespaces, a server) | Install Devin CLI on the VM (`devin auth login`), then the command above in the project folder | `devin` over SSH (inside `tmux` so it survives a dropped connection) |
+
+### Devin Cloud
+
+Devin Cloud sessions run AI-DLC through the `aidlc-devin` plugin
+(`harness/devin/cloud-plugin/`), which loads only in cloud sessions and uses
+the install committed in your repository. After the install command:
+
+1. Commit and push `.devin/`, `aidlc/`, `AGENTS.md` and `.gitignore`; a cloud
+   session sees only what the repository holds.
+2. In Devin, *Settings → Repositories*, give Devin access to the project
+   repository (and to this one, while it is private).
+3. Add Bun to the repository's environment blueprint:
+
+   ```yaml
+   initialize: |
+     curl -fsSL https://bun.sh/install | bash
+   ```
+
+The installed `.devin/config.json` already declares the plugin, so every cloud
+session on the repository installs it. To give it to all your repositories
+instead, use *Customize → Plugins → Add plugin → From repository*:
+`BrianSouza/ai-dlc-devin`, subdirectory `harness/devin/cloud-plugin`. In the
+cloud, plugin hooks are best effort and agents run as Devin's general
+subagent with their persona in the brief.
+
+### Other ways to get it
+
+- **A branch, tag or your own fork:** pass options after `sh -s --`, for
+  example `… | sh -s -- --ref <branch-or-tag>` or `--repo <owner>/<fork>`.
+  `--project <dir>` installs into another folder; `--force` lets an update
+  replace AI-DLC files you edited.
+- **From a clone, without piping a script:** clone this repository and run
+  `sh scripts/install-devin.sh --project /path/to/your-project` from it (it
+  still downloads the ref it installs).
+- **Fully manual:** in a clone, run `bun install --frozen-lockfile` and
+  `bun scripts/package-release.ts --copy-runtime-only --output build/devin`,
+  then in your project run
+  `bun /path/to/clone/dist/devin/.devin/tools/aidlc.ts config --harness devin --yes --from /path/to/clone/build/devin/aidlc-copy-runtime-<version>.tar.gz`.
+
+The [Devin harness guide](docs/guide/harnesses/devin.md) explains how AI-DLC
+maps onto Devin, what differs from the other harnesses, and what has been
+verified.
 
 AI-DLC (AI-Driven Development Life Cycle) turns AI coding assistants into
 structured, verifiable software-delivery workflows. One harness-neutral core
