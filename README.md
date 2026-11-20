@@ -2,8 +2,15 @@
 
 > **This is a fork of [awslabs/aidlc-workflows](https://github.com/awslabs/aidlc-workflows)
 > that adds a [Devin](https://docs.devin.ai) harness** (Devin CLI, Devin
-> Desktop and, through a cloud plugin, Devin Cloud): see [AI-DLC on Devin](docs/guide/harnesses/devin.md) for the
-> manual-copy install and what differs. Everything else tracks upstream; the
+> Desktop and, through a cloud plugin, Devin Cloud). Install it in a project
+> with one command:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/BrianSouza/ai-dlc-devin/main/scripts/install-devin.sh | sh
+> ```
+>
+> See [AI-DLC on Devin](docs/guide/harnesses/devin.md) for what it does and what
+> differs. Everything else tracks upstream; the
 > upstream installer and release files below do not include the Devin runtime.
 
 AI-DLC (AI-Driven Development Life Cycle) turns AI coding assistants into
@@ -98,7 +105,7 @@ guide in the table below. The complete walkthrough is in
 | Cursor | `aidlc config --harness cursor` | Open Cursor or run `agent` | `/aidlc` | [Cursor](docs/guide/harnesses/cursor.md) |
 | opencode >= 1.18.29 / OpenCode 2 | `aidlc config --harness opencode` | `opencode` | `/aidlc` | [opencode](docs/guide/harnesses/opencode.md) |
 | GitHub Copilot CLI >= 1.0.74 / VS Code >= 1.130 | `aidlc config --harness copilot` | Copilot CLI or VS Code | `/aidlc` | [GitHub Copilot](docs/guide/harnesses/copilot.md) |
-| Devin CLI / Devin Desktop / Devin Cloud (this fork) | `bun scripts/package.ts devin`, then copy `dist/devin/` into the project (Devin Cloud also needs the `aidlc-devin` plugin) | `devin` | `/aidlc` | [Devin](docs/guide/harnesses/devin.md) |
+| Devin CLI / Devin Desktop / Devin Cloud (this fork) | `curl -fsSL https://raw.githubusercontent.com/BrianSouza/ai-dlc-devin/main/scripts/install-devin.sh \| sh` in the project | `devin` | `/aidlc` | [Devin](docs/guide/harnesses/devin.md) |
 
 AI-DLC 2.11.3 and earlier, and the 2.11.4 previews of 2026-11-04 and 2026-11-05, read the two Kiro names the other way: Kiro is `--harness kiro-ide` and Kiro CLI (V2) is `--harness kiro`, and they do not know `kiro-v2`. `--harness kiro-ide` names Kiro on those releases and on this one.
 

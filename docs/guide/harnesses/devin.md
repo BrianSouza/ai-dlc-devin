@@ -12,7 +12,7 @@ it.
 > **Fork status.** The Devin harness lives in this fork
 > (`BrianSouza/ai-dlc-devin`), not in upstream `awslabs/aidlc-workflows`. The
 > upstream native installer and its release files do not carry a `devin`
-> runtime, so install with the manual-copy path below.
+> runtime, so install with this fork's one-command installer below.
 
 ## Layout
 
@@ -41,32 +41,45 @@ tree under `aidlc/spaces/default/memory/`), a harness-neutral root
   the shells Devin starts.
 - **A git repository** for the project (`git init` if needed).
 
-## Install (manual copy)
+## Install
 
-From a checkout of this fork:
-
-```bash
-git clone https://github.com/BrianSouza/ai-dlc-devin.git
-cd ai-dlc-devin
-bun install --frozen-lockfile
-bun scripts/package.ts devin        # builds dist/devin/
-```
-
-Then copy the tree into your project. `.devin/` and `aidlc/` copy as they
-are; merge `AGENTS.md` and `.gitignore` into your own files if you already
-have them:
+In the project folder (a git repository), run:
 
 ```bash
-cd /path/to/your-project
-cp -R /path/to/ai-dlc-devin/dist/devin/.devin .
-cp -R /path/to/ai-dlc-devin/dist/devin/aidlc .
-cat /path/to/ai-dlc-devin/dist/devin/.gitignore >> .gitignore
-cat /path/to/ai-dlc-devin/dist/devin/AGENTS.md >> AGENTS.md   # or copy it if you have none
-bun .devin/tools/aidlc.ts doctor
+curl -fsSL https://raw.githubusercontent.com/BrianSouza/ai-dlc-devin/main/scripts/install-devin.sh | sh
 ```
 
-`doctor` should report the project checks as passing (it warns if `devin` is
-not on the `PATH`).
+The installer (`scripts/install-devin.sh`):
+
+1. installs Bun when it is missing;
+2. downloads this repository and builds the Devin runtime from it;
+3. runs the same `aidlc config --harness devin` every harness uses, which
+   adds AI-DLC's block to `AGENTS.md` and `.gitignore` without touching your
+   own lines, keeps any AI-DLC work already under `aidlc/`, and records what it
+   wrote so a later run refreshes only AI-DLC's files;
+4. keeps your own `.devin/config.json`, merging your permissions and plugins
+   with AI-DLC's;
+5. runs `doctor`.
+
+Run the same command again to update. Options go after `sh -s --`:
+
+| Option | Meaning |
+|--------|---------|
+| `--ref <branch\|tag>` | Install another ref of this repository (default `main`) |
+| `--repo <owner/name>` | Install from your own fork of this repository |
+| `--project <dir>` | Install into another folder than the current one |
+| `--force` | Let the refresh replace AI-DLC files you edited |
+
+For example, to pin a tag: `curl -fsSL …/install-devin.sh | sh -s -- --ref v2.11.4`.
+The installer runs on macOS, Linux and WSL.
+
+### Manual install
+
+To build it yourself instead: clone this repository, run
+`bun install --frozen-lockfile` and
+`bun scripts/package-release.ts --copy-runtime-only --output build/devin`, then
+in your project run
+`bun /path/to/ai-dlc-devin/dist/devin/.devin/tools/aidlc.ts config --harness devin --yes --from /path/to/ai-dlc-devin/build/devin/aidlc-copy-runtime-<version>.tar.gz`.
 
 ## First run
 
@@ -137,9 +150,8 @@ in this repository, `harness/devin/cloud-plugin/` (`aidlc-devin`):
 ### Install for Devin Cloud
 
 1. **Commit the install to the project.** Install AI-DLC in the project as in
-   [Install (manual copy)](#install-manual-copy), then commit `.devin/`,
-   `aidlc/`, `AGENTS.md` and `.gitignore` and push. A cloud session only sees
-   what the repository holds.
+   [Install](#install), then commit `.devin/`, `aidlc/`, `AGENTS.md` and
+   `.gitignore` and push. A cloud session only sees what the repository holds.
 2. **Give Devin the repository.** In Devin, *Settings → Repositories*, grant
    access to the project repository and to this fork (the plugin's source).
 3. **Add Bun to the environment.** In the repository's environment blueprint
@@ -153,26 +165,12 @@ in this repository, `harness/devin/cloud-plugin/` (`aidlc-devin`):
 
    Without Bun the plugin's session-start hook tells the agent to ask for it,
    and AI-DLC's hooks do not run.
-4. **Install the plugin**, either way:
-   - *Customize → Plugins → Add plugin → From repository*: `BrianSouza/ai-dlc-devin`,
-     subdirectory `harness/devin/cloud-plugin`, at your personal or
-     organization scope; or
-   - declare it in the project's `.devin/config.json`, so every cloud session
-     of that repository installs it:
-
-     ```json
-     {
-       "requiredPlugins": [
-         {
-           "source": "git-subdir",
-           "url": "https://github.com/BrianSouza/ai-dlc-devin.git",
-           "path": "harness/devin/cloud-plugin"
-         }
-       ]
-     }
-     ```
-
-     Keep the `permissions` block the install wrote in that file.
+4. **The plugin is already declared.** The installed `.devin/config.json`
+   lists the `aidlc-devin` plugin in `requiredPlugins`, so every cloud session
+   on the repository installs it. To install it for every repository instead,
+   use *Customize → Plugins → Add plugin → From repository*:
+   `BrianSouza/ai-dlc-devin`, subdirectory `harness/devin/cloud-plugin`. (The
+   plugin loads only in cloud sessions, so Devin CLI and Desktop ignore it.)
 5. **Start a cloud session** on the repository and type
    `@skills:aidlc Build a REST API for inventory management` (or
    `/aidlc-devin:aidlc ...` from `devin --cloud`).

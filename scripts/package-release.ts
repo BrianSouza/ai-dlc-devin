@@ -263,6 +263,11 @@ function build(argv: string[]): void {
   const output = valueAfter(argv, "--output") || join(REPO_ROOT, "build", "release");
   const binaries = valueAfter(argv, "--binaries") || join(REPO_ROOT, "build", "binaries");
   const requireReleaseMatrix = argv.includes("--require-release-matrix");
+  // --copy-runtime-only builds just aidlc-copy-runtime-X.Y.Z.tar.gz (and its
+  // .sha256), for `aidlc config --from` on a machine that builds AI-DLC from
+  // source (scripts/install-devin.sh): no binaries, installers or manifest,
+  // and no determinism guard, which release builds keep.
+  const copyRuntimeOnly = argv.includes("--copy-runtime-only");
   const regenerate = spawnSync("bun", [join(REPO_ROOT, "scripts", "package.ts")], {
     cwd: REPO_ROOT,
     encoding: "utf-8",
@@ -270,12 +275,14 @@ function build(argv: string[]): void {
   if (regenerate.status !== 0) {
     throw new Error(`package regeneration failed\n${regenerate.stderr}`);
   }
-  const check = spawnSync("bun", [join(REPO_ROOT, "scripts", "package.ts"), "--check"], {
-    cwd: REPO_ROOT,
-    encoding: "utf-8",
-  });
-  if (check.status !== 0) {
-    throw new Error(`package determinism guard failed\n${check.stderr}`);
+  if (!copyRuntimeOnly) {
+    const check = spawnSync("bun", [join(REPO_ROOT, "scripts", "package.ts"), "--check"], {
+      cwd: REPO_ROOT,
+      encoding: "utf-8",
+    });
+    if (check.status !== 0) {
+      throw new Error(`package determinism guard failed\n${check.stderr}`);
+    }
   }
   const generated = verifyGeneratedInventory();
   rmSync(output, { recursive: true, force: true });
@@ -351,6 +358,10 @@ function build(argv: string[]): void {
     `${copyRuntimePath}.sha256`,
     `${digest(copyRuntimePath)}  ${copyRuntimeName}\n`,
   );
+  if (copyRuntimeOnly) {
+    console.log(`packaged ${relative(REPO_ROOT, copyRuntimePath) || copyRuntimePath}`);
+    return;
+  }
 
   for (const input of binaryInputs(binaries)) {
     const verification = buildVerification(
