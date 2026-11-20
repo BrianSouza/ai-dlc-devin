@@ -28,6 +28,12 @@
 //      ambiguity keeps reviewer enforcement on instead of dropping it).
 //   5. There is no PreCompact event: PostCompaction runs validate-state after
 //      the fact, and cloud sessions fire no SessionEnd.
+//   6. Devin Cloud reads hooks from plugins only: the aidlc-devin cloud plugin
+//      (harness/devin/cloud-plugin) runs this same adapter from the cloned
+//      repository. A session that loads both registrations delivers an event
+//      twice, so runDevin answers each identical delivery once (replayed).
+//      Cloud sessions load no custom subagent profiles either; a brief naming
+//      "AIDLC persona: aidlc-<role>-agent" identifies the agent instead.
 //
 // Usage (wired in .devin/hooks.v1.json, cwd = project root):
 //   bun .devin/hooks/aidlc-devin-adapter.ts <target>
@@ -2022,6 +2028,15 @@ export function normalizeDevinPayload(payload: DevinHookInput): DevinHookInput {
     if (agent && input.subagent_type === undefined) input.subagent_type = agent;
     const prompt = firstString(input, ["prompt", "task", "message", "description"]);
     if (prompt && input.prompt === undefined) input.prompt = prompt;
+    // Devin Cloud loads no custom subagent profiles, so the conductor sends an
+    // AI-DLC agent as the general profile with its persona named in the brief
+    // ("AIDLC persona: aidlc-<role>-agent"); the ledger keys on that name.
+    const persona = typeof input.prompt === "string"
+      ? /AIDLC persona:\s*(aidlc-[a-z-]+-agent)\b/.exec(input.prompt)?.[1]
+      : undefined;
+    if (persona && !/^aidlc-[a-z-]+-agent$/.test(String(input.subagent_type ?? ""))) {
+      input.subagent_type = persona;
+    }
   }
   // A tool call's own id, when Devin sends one, keys the dispatch ledger;
   // without one, the turn's prompt_id stands in (one dispatch per turn at a time).
@@ -2056,12 +2071,27 @@ export function applyPatchFiles(payload: DevinHookInput): Array<{ tool: "Write" 
   }));
 }
 
+// What a run printed, captured so it can be replayed or stopped on.
+async function captured(body: () => Promise<number>): Promise<{ code: number; stdout: string }> {
+  const chunks: string[] = [];
+  const write = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8"));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    return { code: await body(), stdout: chunks.join("") };
+  } finally {
+    process.stdout.write = write;
+  }
+}
+
 /**
- * The entry point: an apply_patch call runs the target once per file it
- * touches (a Delete only for the guards, which treat it as a write); the
- * first guard refusal is the call's answer. Every other call runs once.
+ * An apply_patch call runs the target once per file it touches (a Delete only
+ * for the guards, which treat it as a write); the first guard refusal is the
+ * call's answer. Every other call runs once.
  */
-export async function runDevin(target: string, raw: string, extraArgs: string[] = []): Promise<number> {
+async function runFanned(target: string, raw: string, extraArgs: string[]): Promise<number> {
   let parsed: DevinHookInput;
   try {
     parsed = JSON.parse(raw) as DevinHookInput;
@@ -2078,22 +2108,94 @@ export async function runDevin(target: string, raw: string, extraArgs: string[] 
       tool_name: file.tool === "Delete" ? "write" : file.tool === "Edit" ? "edit" : "write",
       tool_input: { ...(parsed.tool_input ?? {}), file_path: file.path },
     };
-    const chunks: string[] = [];
-    const write = process.stdout.write.bind(process.stdout);
-    process.stdout.write = ((chunk: string | Uint8Array) => {
-      chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8"));
-      return true;
-    }) as typeof process.stdout.write;
-    try {
-      code = await run(target, JSON.stringify(payload), extraArgs);
-    } finally {
-      process.stdout.write = write;
-    }
-    const out = chunks.join("");
-    if (out.length > 0) write(out);
-    if (target === "guards" && /"decision"\s*:\s*"block"/.test(out)) return code;
+    const result = await captured(() => run(target, JSON.stringify(payload), extraArgs));
+    code = result.code;
+    if (result.stdout.length > 0) process.stdout.write(result.stdout);
+    if (target === "guards" && /"decision"\s*:\s*"block"/.test(result.stdout)) return code;
   }
   return code;
+}
+
+// One Devin event can reach the adapter twice: from the project's
+// .devin/hooks.v1.json and from the aidlc-devin cloud plugin, when a session
+// loads both. The first delivery of an event runs and records its answer; an
+// identical delivery inside the window replays that answer instead of
+// recording a human turn, an audit row or a dispatch twice. A delivery that
+// finds the first one never finished runs on its own (toward running, never
+// toward dropping the event).
+const REPLAY_DIR = ".aidlc-devin-hook-replay";
+const REPLAY_WINDOW_MS = 2 * 60 * 1000;
+const REPLAY_WAIT_MS = 20 * 1000;
+const REPLAY_KEEP_MS = 10 * 60 * 1000;
+
+function replayProjectDir(): string | null {
+  const raw = process.env.AIDLC_PROJECT_DIR ?? process.env.DEVIN_PROJECT_DIR ?? process.cwd();
+  const dir = isAbsolute(raw) ? raw : resolve(process.cwd(), raw);
+  return existsSync(join(dir, "aidlc")) ? dir : null;
+}
+
+function pruneReplays(dir: string): void {
+  try {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (Date.now() - statSync(path).mtimeMs > REPLAY_KEEP_MS) rmSync(path, { force: true });
+    }
+  } catch {
+    // best effort: stale entries only cost disk
+  }
+}
+
+/** The entry point: each Devin event runs once, however many registrations deliver it. */
+export async function runDevin(target: string, raw: string, extraArgs: string[] = []): Promise<number> {
+  const project = replayProjectDir();
+  if (project === null) return runFanned(target, raw, extraArgs);
+  const dir = join(project, "aidlc", REPLAY_DIR);
+  let owner = false;
+  let claim = "";
+  let result = "";
+  try {
+    mkdirSync(dir, { recursive: true });
+    pruneReplays(dir);
+    const key = createHash("sha256").update(`${target}\0${raw}`).digest("hex").slice(0, 32);
+    claim = join(dir, `${key}.claim`);
+    result = join(dir, `${key}.json`);
+    try {
+      writeFileSync(claim, String(process.pid), { flag: "wx" });
+      owner = true;
+    } catch {
+      if (Date.now() - statSync(claim).mtimeMs > REPLAY_WINDOW_MS) {
+        rmSync(result, { force: true });
+        writeFileSync(claim, String(process.pid));
+        owner = true;
+      }
+    }
+  } catch {
+    return runFanned(target, raw, extraArgs);
+  }
+  if (!owner) {
+    const deadline = Date.now() + REPLAY_WAIT_MS;
+    while (Date.now() < deadline) {
+      try {
+        const prior = JSON.parse(readFileSync(result, "utf-8")) as { code: number; stdout: string };
+        if (prior.stdout) process.stdout.write(prior.stdout);
+        return prior.code;
+      } catch {
+        await Bun.sleep(100);
+      }
+    }
+  }
+  const outcome = await captured(() => runFanned(target, raw, extraArgs));
+  if (outcome.stdout) process.stdout.write(outcome.stdout);
+  if (owner) {
+    try {
+      const pending = `${result}.${process.pid}.tmp`;
+      writeFileSync(pending, JSON.stringify(outcome));
+      renameSync(pending, result);
+    } catch {
+      // a replay that cannot be recorded leaves a duplicate to run on its own
+    }
+  }
+  return outcome.code;
 }
 
 if (import.meta.main) {

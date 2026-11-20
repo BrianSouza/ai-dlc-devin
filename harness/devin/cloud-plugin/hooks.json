@@ -1,0 +1,84 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "sh -c 'T=session-start; for d in \"${DEVIN_PROJECT_DIR:-}\" \"$PWD\" \"$HOME\"/repos/* \"$HOME\"/*; do [ -n \"$d\" ] && [ -f \"$d/.devin/hooks.v1.json\" ] && [ -d \"$d/.devin/hooks\" ] || continue; cd \"$d\" || exit 0; export DEVIN_PROJECT_DIR=\"$d\" AIDLC_DEVIN_CLOUD=1; if grep -q \"aidlc engine adapter devin\" .devin/hooks.v1.json && command -v aidlc >/dev/null 2>&1; then exec aidlc engine adapter devin \"$T\"; fi; B=$(command -v bun || true); [ -n \"$B\" ] || { [ -x \"$HOME/.bun/bin/bun\" ] && B=\"$HOME/.bun/bin/bun\"; }; [ -n \"$B\" ] && exec \"$B\" .devin/hooks/aidlc-devin-adapter.ts \"$T\"; [ \"$T\" = session-start ] && printf \"%s\\n\" '\"'\"'{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"AI-DLC is installed in this repository but Bun is not available in this Devin environment, so its hooks cannot run and approval gates will not record the person'\"'\"'\"'\"'\"'\"'\"'\"'s replies. Tell the person, in one line, to add Bun to the environment blueprint (initialize: curl -fsSL https://bun.sh/install | bash) and start a new session.\"}}'\"'\"'; exit 0; done; exit 0'",
+          "timeout": 1800
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "sh -c 'T=mint; for d in \"${DEVIN_PROJECT_DIR:-}\" \"$PWD\" \"$HOME\"/repos/* \"$HOME\"/*; do [ -n \"$d\" ] && [ -f \"$d/.devin/hooks.v1.json\" ] && [ -d \"$d/.devin/hooks\" ] || continue; cd \"$d\" || exit 0; export DEVIN_PROJECT_DIR=\"$d\" AIDLC_DEVIN_CLOUD=1; if grep -q \"aidlc engine adapter devin\" .devin/hooks.v1.json && command -v aidlc >/dev/null 2>&1; then exec aidlc engine adapter devin \"$T\"; fi; B=$(command -v bun || true); [ -n \"$B\" ] || { [ -x \"$HOME/.bun/bin/bun\" ] && B=\"$HOME/.bun/bin/bun\"; }; [ -n \"$B\" ] && exec \"$B\" .devin/hooks/aidlc-devin-adapter.ts \"$T\"; [ \"$T\" = session-start ] && printf \"%s\\n\" '\"'\"'{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"AI-DLC is installed in this repository but Bun is not available in this Devin environment, so its hooks cannot run and approval gates will not record the person'\"'\"'\"'\"'\"'\"'\"'\"'s replies. Tell the person, in one line, to add Bun to the environment blueprint (initialize: curl -fsSL https://bun.sh/install | bash) and start a new session.\"}}'\"'\"'; exit 0; done; exit 0'",
+          "timeout": 1800
+        }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "^(exec|read|write|edit|apply_patch|notebook_read|notebook_edit|grep|glob|run_subagent|ask_user_question)$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "sh -c 'T=guards; for d in \"${DEVIN_PROJECT_DIR:-}\" \"$PWD\" \"$HOME\"/repos/* \"$HOME\"/*; do [ -n \"$d\" ] && [ -f \"$d/.devin/hooks.v1.json\" ] && [ -d \"$d/.devin/hooks\" ] || continue; cd \"$d\" || exit 0; export DEVIN_PROJECT_DIR=\"$d\" AIDLC_DEVIN_CLOUD=1; if grep -q \"aidlc engine adapter devin\" .devin/hooks.v1.json && command -v aidlc >/dev/null 2>&1; then exec aidlc engine adapter devin \"$T\"; fi; B=$(command -v bun || true); [ -n \"$B\" ] || { [ -x \"$HOME/.bun/bin/bun\" ] && B=\"$HOME/.bun/bin/bun\"; }; [ -n \"$B\" ] && exec \"$B\" .devin/hooks/aidlc-devin-adapter.ts \"$T\"; [ \"$T\" = session-start ] && printf \"%s\\n\" '\"'\"'{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"AI-DLC is installed in this repository but Bun is not available in this Devin environment, so its hooks cannot run and approval gates will not record the person'\"'\"'\"'\"'\"'\"'\"'\"'s replies. Tell the person, in one line, to add Bun to the environment blueprint (initialize: curl -fsSL https://bun.sh/install | bash) and start a new session.\"}}'\"'\"'; exit 0; done; exit 0'",
+          "timeout": 1800
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "^(write|edit|apply_patch|notebook_edit|run_subagent)$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "sh -c 'T=audit-and-sensors; for d in \"${DEVIN_PROJECT_DIR:-}\" \"$PWD\" \"$HOME\"/repos/* \"$HOME\"/*; do [ -n \"$d\" ] && [ -f \"$d/.devin/hooks.v1.json\" ] && [ -d \"$d/.devin/hooks\" ] || continue; cd \"$d\" || exit 0; export DEVIN_PROJECT_DIR=\"$d\" AIDLC_DEVIN_CLOUD=1; if grep -q \"aidlc engine adapter devin\" .devin/hooks.v1.json && command -v aidlc >/dev/null 2>&1; then exec aidlc engine adapter devin \"$T\"; fi; B=$(command -v bun || true); [ -n \"$B\" ] || { [ -x \"$HOME/.bun/bin/bun\" ] && B=\"$HOME/.bun/bin/bun\"; }; [ -n \"$B\" ] && exec \"$B\" .devin/hooks/aidlc-devin-adapter.ts \"$T\"; [ \"$T\" = session-start ] && printf \"%s\\n\" '\"'\"'{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"AI-DLC is installed in this repository but Bun is not available in this Devin environment, so its hooks cannot run and approval gates will not record the person'\"'\"'\"'\"'\"'\"'\"'\"'s replies. Tell the person, in one line, to add Bun to the environment blueprint (initialize: curl -fsSL https://bun.sh/install | bash) and start a new session.\"}}'\"'\"'; exit 0; done; exit 0'",
+          "timeout": 3600
+        }
+      ]
+    },
+    {
+      "matcher": "^exec$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "sh -c 'T=runtime-compile; for d in \"${DEVIN_PROJECT_DIR:-}\" \"$PWD\" \"$HOME\"/repos/* \"$HOME\"/*; do [ -n \"$d\" ] && [ -f \"$d/.devin/hooks.v1.json\" ] && [ -d \"$d/.devin/hooks\" ] || continue; cd \"$d\" || exit 0; export DEVIN_PROJECT_DIR=\"$d\" AIDLC_DEVIN_CLOUD=1; if grep -q \"aidlc engine adapter devin\" .devin/hooks.v1.json && command -v aidlc >/dev/null 2>&1; then exec aidlc engine adapter devin \"$T\"; fi; B=$(command -v bun || true); [ -n \"$B\" ] || { [ -x \"$HOME/.bun/bin/bun\" ] && B=\"$HOME/.bun/bin/bun\"; }; [ -n \"$B\" ] && exec \"$B\" .devin/hooks/aidlc-devin-adapter.ts \"$T\"; [ \"$T\" = session-start ] && printf \"%s\\n\" '\"'\"'{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"AI-DLC is installed in this repository but Bun is not available in this Devin environment, so its hooks cannot run and approval gates will not record the person'\"'\"'\"'\"'\"'\"'\"'\"'s replies. Tell the person, in one line, to add Bun to the environment blueprint (initialize: curl -fsSL https://bun.sh/install | bash) and start a new session.\"}}'\"'\"'; exit 0; done; exit 0'",
+          "timeout": 1800
+        }
+      ]
+    }
+  ],
+  "PostCompaction": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "sh -c 'T=validate-state; for d in \"${DEVIN_PROJECT_DIR:-}\" \"$PWD\" \"$HOME\"/repos/* \"$HOME\"/*; do [ -n \"$d\" ] && [ -f \"$d/.devin/hooks.v1.json\" ] && [ -d \"$d/.devin/hooks\" ] || continue; cd \"$d\" || exit 0; export DEVIN_PROJECT_DIR=\"$d\" AIDLC_DEVIN_CLOUD=1; if grep -q \"aidlc engine adapter devin\" .devin/hooks.v1.json && command -v aidlc >/dev/null 2>&1; then exec aidlc engine adapter devin \"$T\"; fi; B=$(command -v bun || true); [ -n \"$B\" ] || { [ -x \"$HOME/.bun/bin/bun\" ] && B=\"$HOME/.bun/bin/bun\"; }; [ -n \"$B\" ] && exec \"$B\" .devin/hooks/aidlc-devin-adapter.ts \"$T\"; [ \"$T\" = session-start ] && printf \"%s\\n\" '\"'\"'{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"AI-DLC is installed in this repository but Bun is not available in this Devin environment, so its hooks cannot run and approval gates will not record the person'\"'\"'\"'\"'\"'\"'\"'\"'s replies. Tell the person, in one line, to add Bun to the environment blueprint (initialize: curl -fsSL https://bun.sh/install | bash) and start a new session.\"}}'\"'\"'; exit 0; done; exit 0'",
+          "timeout": 1800
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "sh -c 'T=stop; for d in \"${DEVIN_PROJECT_DIR:-}\" \"$PWD\" \"$HOME\"/repos/* \"$HOME\"/*; do [ -n \"$d\" ] && [ -f \"$d/.devin/hooks.v1.json\" ] && [ -d \"$d/.devin/hooks\" ] || continue; cd \"$d\" || exit 0; export DEVIN_PROJECT_DIR=\"$d\" AIDLC_DEVIN_CLOUD=1; if grep -q \"aidlc engine adapter devin\" .devin/hooks.v1.json && command -v aidlc >/dev/null 2>&1; then exec aidlc engine adapter devin \"$T\"; fi; B=$(command -v bun || true); [ -n \"$B\" ] || { [ -x \"$HOME/.bun/bin/bun\" ] && B=\"$HOME/.bun/bin/bun\"; }; [ -n \"$B\" ] && exec \"$B\" .devin/hooks/aidlc-devin-adapter.ts \"$T\"; [ \"$T\" = session-start ] && printf \"%s\\n\" '\"'\"'{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"AI-DLC is installed in this repository but Bun is not available in this Devin environment, so its hooks cannot run and approval gates will not record the person'\"'\"'\"'\"'\"'\"'\"'\"'s replies. Tell the person, in one line, to add Bun to the environment blueprint (initialize: curl -fsSL https://bun.sh/install | bash) and start a new session.\"}}'\"'\"'; exit 0; done; exit 0'",
+          "timeout": 3600
+        }
+      ]
+    }
+  ]
+}
