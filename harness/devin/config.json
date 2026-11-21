@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(bun {{HARNESS_DIR}}/tools/aidlc.ts engine)",
+      "Exec(bun {{HARNESS_DIR}}/tools/aidlc-*)"
+    ],
+    "deny": []
+  },
+  "requiredPlugins": [
+    {
+      "source": "git-subdir",
+      "url": "https://github.com/BrianSouza/ai-dlc-devin.git",
+      "path": "harness/devin/cloud-plugin"
+    }
+  ]
+}

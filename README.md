@@ -1,1 +1,281 @@
-# ai-dlc-devin
+# AI-DLC - one core, many harnesses
+
+> **This is a fork of [awslabs/aidlc-workflows](https://github.com/awslabs/aidlc-workflows)
+> that adds a [Devin](https://docs.devin.ai) harness** (Devin CLI, Devin
+> Desktop and, through a cloud plugin, Devin Cloud). See
+> [AI-DLC on Devin](#ai-dlc-on-devin) below for how to install and run it in
+> each Devin scenario. Everything else tracks upstream; the upstream installer
+> and release files further down do not include the Devin runtime.
+
+## AI-DLC on Devin
+
+One command installs AI-DLC into a project. Run it in the project folder (a
+git repository); it works on macOS, Linux and WSL:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BrianSouza/ai-dlc-devin/main/scripts/install-devin.sh | sh
+```
+
+It installs Bun when missing, downloads this repository, builds the Devin
+runtime and runs `aidlc config --harness devin`. That adds AI-DLC's block to
+`AGENTS.md` and `.gitignore` without touching your own lines, keeps your
+`.devin/config.json` settings and any AI-DLC work already in `aidlc/`, and
+ends with `doctor`. Run the same command again to update.
+
+| Scenario | Install | Run |
+|----------|---------|-----|
+| **Devin CLI** on your computer | The command above, in the project folder | `devin` in that folder, then `/aidlc --doctor` and `/aidlc <what to build>` |
+| **Devin Desktop** | The command above, in the project folder | Open the folder in Devin Desktop, then `/aidlc <what to build>` |
+| **Devin Cloud** (web app, Slack, automations, `devin --cloud`) | The command above, then the [cloud steps](#devin-cloud) | `@skills:aidlc <what to build>` in a session on the repository |
+| **Devin CLI on a cloud VM** (EC2, Codespaces, a server) | Install Devin CLI on the VM (`devin auth login`), then the command above in the project folder | `devin` over SSH (inside `tmux` so it survives a dropped connection) |
+
+### Devin Cloud
+
+Devin Cloud sessions run AI-DLC through the `aidlc-devin` plugin
+(`harness/devin/cloud-plugin/`), which loads only in cloud sessions and uses
+the install committed in your repository. After the install command:
+
+1. Commit and push `.devin/`, `aidlc/`, `AGENTS.md` and `.gitignore`; a cloud
+   session sees only what the repository holds.
+2. In Devin, *Settings → Repositories*, give Devin access to the project
+   repository (and to this one, while it is private).
+3. Optional: add Bun to the repository's environment blueprint. Without it,
+   AI-DLC's first hook installs Bun on the cloud VM, which adds a few seconds
+   at the start of each session.
+
+   ```yaml
+   initialize: |
+     curl -fsSL https://bun.sh/install | bash
+   ```
+
+The installed `.devin/config.json` already declares the plugin, so every cloud
+session on the repository installs it. To give it to all your repositories
+instead, use *Customize → Plugins → Add plugin → From repository*:
+`BrianSouza/ai-dlc-devin`, subdirectory `harness/devin/cloud-plugin`. In the
+cloud, plugin hooks are best effort and agents run as Devin's general
+subagent with their persona in the brief.
+
+### Other ways to get it
+
+- **A branch, tag or your own fork:** pass options after `sh -s --`, for
+  example `… | sh -s -- --ref <branch-or-tag>` or `--repo <owner>/<fork>`.
+  `--project <dir>` installs into another folder; `--force` lets an update
+  replace AI-DLC files you edited.
+- **From a clone, without piping a script:** clone this repository and run
+  `sh scripts/install-devin.sh --project /path/to/your-project` from it (it
+  still downloads the ref it installs).
+- **Fully manual:** in a clone, run `bun install --frozen-lockfile` and
+  `bun scripts/package-release.ts --copy-runtime-only --output build/devin`,
+  then in your project run
+  `bun /path/to/clone/dist/devin/.devin/tools/aidlc.ts config --harness devin --yes --from /path/to/clone/build/devin/aidlc-copy-runtime-<version>.tar.gz`.
+
+The [Devin harness guide](docs/guide/harnesses/devin.md) explains how AI-DLC
+maps onto Devin, what differs from the other harnesses, and what has been
+verified.
+
+AI-DLC (AI-Driven Development Life Cycle) turns AI coding assistants into
+structured, verifiable software-delivery workflows. One harness-neutral core
+runs natively in Claude Code, Kiro CLI, Kiro IDE, Codex CLI, Cursor, opencode,
+and GitHub Copilot.
+
+![version](https://img.shields.io/badge/version-2.11.4-blue)
+![license](https://img.shields.io/badge/license-MIT--0-green)
+
+The Quick Start below installs the latest stable AI-DLC release.
+
+## Quick Start
+
+### 1. Install AI-DLC
+
+macOS, Linux, or WSL:
+
+```bash
+curl -fsSL https://github.com/awslabs/aidlc-workflows/releases/latest/download/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://github.com/awslabs/aidlc-workflows/releases/latest/download/install.ps1 | iex
+```
+
+The installer sets up everything AI-DLC needs: the native `aidlc` command and
+every harness runtime. You do not need to install Bun or Node.js; a native
+install runs its hooks and commands through `aidlc` and does not call `bun`.
+On Windows, it installs for the current account
+and automatically registers the bin directory in User PATH. Run it from a normal
+PowerShell window; one opened with "Run as administrator" gets a warning and a
+prompt, since installing as administrator is less safe. Open a new terminal
+if another session cannot find `aidlc`. To skip both persistent and
+current-process PATH changes, use
+[`-NoModifyPath`](docs/guide/18-install-and-lifecycle.md#windows-powershell).
+Windows uninstall removes only the User PATH entry recorded as installer-owned.
+On macOS, Linux, or WSL, follow the installer's PATH instruction if needed.
+
+Prefer to manage the project files yourself, or cannot install a native
+executable? The manual-copy path is the one place Bun is needed: install
+[Bun](https://bun.sh/), download `aidlc-copy-runtime-X.Y.Z.tar.gz` from the
+[release](https://github.com/awslabs/aidlc-workflows/releases/latest), and copy
+the complete `runtime/<harness>/` directory into your project. This path does
+not require the native `aidlc` command.
+
+### 2. Configure a project
+
+From the project root, select the harness you use:
+
+```bash
+cd /path/to/your-project
+aidlc config --harness claude
+aidlc doctor
+```
+
+Replace `claude` with `kiro`, `kiro-v2`, `codex`, `cursor`, `opencode`, or
+`copilot`. Running `aidlc config` without `--harness` starts the interactive
+setup when a terminal is available. If you use Kiro IDE's own terminal in a
+project folder you have not trusted yet, Kiro first asks whether you trust it.
+Choose **Trust Folder & Continue** only for your own project or one you have
+checked, because trusting lets the folder's `.kiro` hooks run commands on your
+machine; otherwise choose **Cancel** and review the folder first (see
+[First run](docs/guide/harnesses/kiro.md#first-run)).
+
+### 3. Start a workflow
+
+Open your harness in the configured project and describe the work:
+
+```text
+/aidlc Build a REST API for inventory management
+```
+
+Codex CLI uses `$aidlc` instead of `/aidlc`. In Kiro IDE, first choose **aidlc**
+in the chat panel's agent picker. AI-DLC selects a workflow from the request,
+asks for missing decisions, and stops at approval gates before moving forward.
+
+For provider setup, trust prompts, and harness-specific prerequisites, use the
+guide in the table below. The complete walkthrough is in
+[Getting Started](docs/guide/01-getting-started.md).
+
+## Pick your harness
+
+| Harness | Configure | Open | Invoke | Guide |
+| --- | --- | --- | --- | --- |
+| Claude Code | `aidlc config --harness claude` | `claude` | `/aidlc` | [Getting Started](docs/guide/01-getting-started.md) |
+| Kiro: Kiro IDE >= 1.1.70 / Kiro CLI >= 2.24.1 (v3) | `aidlc config --harness kiro` | Open the project in Kiro IDE and choose **aidlc** in the chat panel's agent picker, or run `kiro-cli --v3` (when Kiro asks whether you trust the folder and you know what is in it, choose **Trust, continue**) | `/aidlc` | [Kiro](docs/guide/harnesses/kiro.md) |
+| Kiro CLI (V2) >= 2.6 | `aidlc config --harness kiro-v2` | `kiro-cli --v2` (Kiro CLI 2.21.4 or later; for an older one, see [Kiro CLI (V2) prerequisites](docs/guide/harnesses/kiro.md#kiro-cli-v2-prerequisites)) | `/aidlc` | [Kiro CLI (V2)](docs/guide/harnesses/kiro.md#kiro-cli-v2) |
+| Codex CLI >= 0.145.0 | `aidlc config --harness codex` | `codex` | `$aidlc` | [Codex CLI](docs/guide/harnesses/codex-cli.md) |
+| Cursor | `aidlc config --harness cursor` | Open Cursor or run `agent` | `/aidlc` | [Cursor](docs/guide/harnesses/cursor.md) |
+| opencode >= 1.18.29 / OpenCode 2 | `aidlc config --harness opencode` | `opencode` | `/aidlc` | [opencode](docs/guide/harnesses/opencode.md) |
+| GitHub Copilot CLI >= 1.0.74 / VS Code >= 1.130 | `aidlc config --harness copilot` | Copilot CLI or VS Code | `/aidlc` | [GitHub Copilot](docs/guide/harnesses/copilot.md) |
+| Devin CLI / Devin Desktop / Devin Cloud (this fork) | `curl -fsSL https://raw.githubusercontent.com/BrianSouza/ai-dlc-devin/main/scripts/install-devin.sh \| sh` in the project (it runs `aidlc config --harness devin` for you) | `devin` | `/aidlc` | [Devin](docs/guide/harnesses/devin.md) |
+
+AI-DLC 2.11.3 and earlier, and the 2.11.4 previews of 2026-11-04 and 2026-11-05, read the two Kiro names the other way: Kiro is `--harness kiro-ide` and Kiro CLI (V2) is `--harness kiro`, and they do not know `kiro-v2`. `--harness kiro-ide` names Kiro on those releases and on this one.
+
+Model-provider setup belongs to the harness. Shipped project configuration
+keeps the provider and model already selected by the user. `aidlc config
+providers` can apply Amazon Bedrock settings on supported project surfaces or
+record manual setup for other harnesses. Kiro CLI and Kiro IDE need no provider
+answer because model access comes with Kiro. For Kiro's v3 engine on Kiro CLI
+2.24.1 or later, use `kiro` and start `kiro-cli --v3` (when it asks to trust the folder
+and you know what is in it, choose **Trust, continue**); `kiro-v2` is Kiro CLI (V2)
+([Kiro CLI (V2)](docs/guide/harnesses/kiro.md#kiro-cli-v2) says how an existing Kiro CLI
+(V2) project switches). The methodology itself is
+provider-independent.
+
+## Recommended Model
+
+AI-DLC works best with capable reasoning models. The current recommended model
+is Claude Opus 4.8. If Opus is not available to you, or you are not sure where
+to set the model and effort on your harness, see
+[Choosing a Model and Effort](docs/guide/18-install-and-lifecycle.md#choosing-a-model-and-effort).
+
+## Why AI-DLC
+
+Ad-hoc AI coding loses context as projects grow. AI-DLC keeps requirements,
+decisions, implementation, tests, and operational work connected through one
+audited lifecycle:
+
+- 5 phases and 33 stages from initialization through operation
+- 14 agents: 11 domain experts, 2 reviewers, and an adaptive composer
+- 11 workflow profiles for features, bug fixes, infrastructure, security,
+  proofs of concept, enterprise delivery, and other common work
+- Human approval gates and source-bound review evidence
+- 134-event audit trail plus persistent state, team knowledge, and learned rules
+- The same deterministic engine across every supported harness
+
+Start with [Workflow Profiles](docs/guide/workflow-profiles.md) to compare
+Classic, Express, and the focused workflows. See the
+[AI-DLC Workflows 2.0 Specification](assets/AI-DLC-Workflows-2.0-Specification.pdf)
+for the architecture and methodology.
+
+> [!IMPORTANT]
+> Generative AI can make mistakes. Review generated output and costs before
+> acting on them. See the [AWS Responsible AI Policy](https://aws.amazon.com/ai/responsible-ai/policy/).
+
+## Documentation
+
+| Guide | Use it when |
+| --- | --- |
+| [Getting Started](docs/guide/01-getting-started.md) | Installing, configuring, and running your first workflow |
+| [User Guide](docs/guide/00-introduction.md) | Using workflows, profiles, agents, knowledge, and approval gates |
+| [Harness guides](docs/guide/harnesses/README.md) | Handling provider, trust, and runtime differences |
+| [Install and Lifecycle](docs/guide/18-install-and-lifecycle.md) | Updating, pinning, installing offline, using mirrors, uninstalling, or removing AI-DLC from a project |
+| [Harness Engineer Guide](docs/harness-engineering/00-overview.md) | Reshaping stages, agents, rules, sensors, and knowledge |
+| [Development and Releases](DEVELOPERS.md) | Taking a PR through AI review, preview testing, and stable publication |
+| [Developer Reference](docs/reference/00-overview.md) | Changing the engine, hooks, packaging, or tests |
+
+## Repository Layout
+
+- `core/` - hand-authored, harness-neutral methodology and engine
+- `core/tools/` - the aidlc-*.ts engine and authoring tools
+- `harness/<name>/` - thin, harness-specific manifests and integrations
+- `plugins/<name>/` - optional AIDLC plugins
+- `scripts/` - packaging, binary, installer, and release tooling
+- `tests/` - smoke, unit, integration, and end-to-end tests
+- `docs/` - user, harness-engineering, and developer documentation
+- `dist/` and `dist-release/` - generated, ignored local outputs
+
+Edit `core/` or `harness/<name>/`, never generated `dist*` output.
+
+## Development
+
+Install dependencies and generate every harness:
+
+```bash
+bun install --frozen-lockfile
+bun scripts/package.ts
+```
+
+Useful commands:
+
+```bash
+bun scripts/package.ts <name>     # generate one harness
+bun scripts/package.ts --check    # determinism guard
+bun tests/run-tests.ts --ci       # smoke, unit, and integration
+bun tests/run-tests.ts --release  # full release acceptance
+```
+
+See the [Contributing Guide](docs/reference/11-contributing.md) for the complete
+development workflow and [Porting to a New Harness](docs/harness-engineering/09-porting-to-a-new-harness.md)
+to add another runtime.
+
+## Troubleshooting
+
+Run `aidlc doctor` from the project root first. Common fixes:
+
+| Symptom | Fix |
+| --- | --- |
+| `aidlc` is not found | On Windows, quit and reopen the terminal app or IDE (a new tab inside one that was open during the install keeps the old PATH), or use the direct command printed with [`-NoModifyPath`](docs/guide/18-install-and-lifecycle.md#windows-powershell). On Unix, apply the installer's PATH instruction. |
+| Project/runtime version skew | Run `aidlc config` |
+| Codex hooks do not run | Trust the project hooks as described in the [Codex guide](docs/guide/harnesses/codex-cli.md) |
+| Bedrock access fails | Enable the configured models and verify AWS credentials and region |
+| Plugin stages disappear after refresh | Run `/aidlc plugin sync` |
+| Refreshed skills do not take effect | Start a new harness session |
+
+See [Troubleshooting](docs/guide/15-troubleshooting.md) for diagnostic and
+recovery procedures.
+
+## References
+
+- [AWS AI-DLC blog post](https://aws.amazon.com/blogs/devops/ai-driven-development-life-cycle/)
+- [AI-DLC Method Definition Paper](https://prod.d13rzhkk8cj2z0.amplifyapp.com/)
+- [Roadmap](https://awslabs.github.io/aidlc-workflows/roadmap.html)
+- [License](LICENSE)
