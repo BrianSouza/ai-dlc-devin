@@ -236,7 +236,7 @@ jobs:
           steps.authorization.outputs.authorized == 'true'
           && steps.context.outputs.skip != 'true'
           && steps.context.outputs.already_reviewed != 'true'
-        uses: aws-actions/configure-aws-credentials@451ce2a72e8d729a59ebeaacab82dbce58e7af4c # v6
+        uses: aws-actions/configure-aws-credentials@416c15366b69fd69e1df1513e25ba57af8e11d5f # v6
         with:
           role-to-assume: ${{ secrets.AWS_AI_PR_REVIEW_ROLE_ARN }}
           role-session-name: aidlc-issue-${{ steps.context.outputs.issue }}
