@@ -90,6 +90,7 @@ const manifest: HarnessManifest = {
   harnessFiles: [
     // The orchestrator skill — Devin's native layout, /aidlc invocation.
     { src: "skills/aidlc/SKILL.md", dst: "skills/aidlc/SKILL.md" },
+    { src: "skills/aidlc/workflow.md", dst: "skills/aidlc/workflow.md" },
     { src: "skills/aidlc/question-rendering.md", dst: "skills/aidlc/question-rendering.md" },
     { src: "skills/aidlc/composer.md", dst: "skills/aidlc/composer.md" },
     { src: "skills/aidlc/tables.md", dst: "skills/aidlc/tables.md" },

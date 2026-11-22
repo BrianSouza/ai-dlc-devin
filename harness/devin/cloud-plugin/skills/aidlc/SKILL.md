@@ -19,9 +19,9 @@ triggers: ["user"]
    that AI-DLC is not installed in these repositories, point them to
    `docs/guide/harnesses/devin.md` in the ai-dlc-devin repository for the
    install, and stop.
-2. Read that repository's `.devin/skills/aidlc/SKILL.md` in full, together
-   with the files it names beside it (`question-rendering.md`, `composer.md`,
-   `tables.md`) when it tells you to, and follow it exactly with
+2. Read that repository's `.devin/skills/aidlc/SKILL.md` and `workflow.md`
+   beside it in full, together with the other files it names beside it
+   (`question-rendering.md`, `composer.md`, `tables.md`) when it tells you to, and follow it exactly with
    `$ARGUMENTS`. It is the conductor; this file only finds it.
 3. Run `bun --version` once. If Bun is missing, tell the person in one line
    that AI-DLC needs Bun in the Devin environment (blueprint
