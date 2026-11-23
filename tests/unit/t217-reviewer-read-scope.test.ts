@@ -55,7 +55,7 @@ describe("t217 reviewer read-scope bound is stated on every surface", () => {
   test("orchestrator SKILL.md points reviewer work at the conditional module", () => {
     for (const harness of HARNESS_MATRIX) {
       const path = join(harness.authoredRoot, SKILL);
-      const body = readFileSync(path, "utf-8");
+      const body = readConductorSurface(path);
       const labelledBody = `harness ${harness.name}: ${path}\n${body}`;
       expect(labelledBody).toContain("stage-protocol-reviewer.md");
       expect(labelledBody).toContain("directive.protocol_modules");

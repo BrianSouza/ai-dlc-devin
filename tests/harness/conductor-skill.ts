@@ -6,7 +6,8 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 // The files each harness's /aidlc conductor skill is made of, SKILL.md first,
 // all in one folder. Kiro loads at most 50,000 characters from one agent
-// resource file, so the Kiro row's skill (`kiro-ide`) goes on in workflow.md.
+// resource file, so the Kiro row's skill (`kiro-ide`) goes on in workflow.md;
+// Devin's is split the same way to keep each skill file well under that size.
 // tests/harness/harness-matrix.ts checks every harness has an entry and that
 // its manifest ships each file.
 export const CONDUCTOR_SKILL_FILES = {
@@ -14,7 +15,7 @@ export const CONDUCTOR_SKILL_FILES = {
   codex: ["SKILL.md"],
   copilot: ["SKILL.md"],
   cursor: ["SKILL.md"],
-  devin: ["SKILL.md"],
+  devin: ["SKILL.md", "workflow.md"],
   "kiro-ide": ["SKILL.md", "workflow.md"],
   kiro: ["SKILL.md"],
   opencode: ["SKILL.md"],
