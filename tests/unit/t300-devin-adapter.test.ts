@@ -426,41 +426,36 @@ describe("aidlc-devin cloud plugin", () => {
       cpSync(DEVIN_DIST, repo, { recursive: true });
       spawnSync("git", ["init", "-q"], { cwd: repo });
       const env: Record<string, string> = { HOME: home, PATH: process.env.PATH ?? "" };
-      const hooksFile = join(repo, ".devin", "hooks.v1.json");
-      const current = readFileSync(hooksFile, "utf-8");
+      const mark = join(repo, "aidlc", ".aidlc-devin-hook-replay", "project-hooks-ran");
+      const run = (session: string, extra: Record<string, string> = {}) =>
+        spawnSync("sh", ["-c", command], {
+          cwd: tmpdir(),
+          env: { ...env, ...extra },
+          input: JSON.stringify({ hook_event_name: "SessionStart", source: "startup", session_id: session }),
+          encoding: "utf-8",
+        });
 
-      // Devin Cloud runs the repository's own hooks too, and current ones
-      // find Bun themselves, so the plugin steps aside: each hook runs once.
-      const sidestep = spawnSync("sh", ["-c", command], {
-        cwd: tmpdir(),
-        env,
-        input: JSON.stringify({ hook_event_name: "SessionStart", source: "startup", session_id: "cloud-0" }),
-        encoding: "utf-8",
-      });
-      expect(sidestep.status, sidestep.stderr).toBe(0);
-      expect(sidestep.stdout).toBe("");
-
-      // An older install's hooks (plain `bun`, no Bun bootstrap) need the plugin.
-      writeFileSync(
-        hooksFile,
-        JSON.stringify(
-          Object.fromEntries(
-            Object.keys(JSON.parse(current) as Record<string, unknown>).map((event) => [
-              event,
-              [{ matcher: "", hooks: [{ type: "command", command: 'bun "$DEVIN_PROJECT_DIR/.devin/hooks/aidlc-devin-adapter.ts" x' }] }],
-            ]),
-          ),
-        ),
-      );
-      const started = spawnSync("sh", ["-c", command], {
-        cwd: tmpdir(),
-        env,
-        input: JSON.stringify({ hook_event_name: "SessionStart", source: "startup", session_id: "cloud-1" }),
-        encoding: "utf-8",
-      });
+      // AI-DLC installed during the session: Devin loaded no project hooks, so
+      // the plugin runs the install's adapter, and leaves no project-hooks mark.
+      const started = run("cloud-1");
       expect(started.status, started.stderr).toBe(0);
       expect(started.stdout).toContain('"hookEventName":"SessionStart"');
       expect(started.stdout).toContain("cloud-1");
+      expect(existsSync(mark)).toBe(false);
+
+      // The project's own hooks ran (Devin loaded them when the session
+      // started): they leave the mark, and the plugin steps aside.
+      const project = spawnSync("bun", [join(repo, ".devin", "hooks", "aidlc-devin-adapter.ts"), "session-start"], {
+        cwd: repo,
+        env: { ...env, DEVIN_PROJECT_DIR: repo },
+        input: JSON.stringify({ hook_event_name: "SessionStart", source: "startup", session_id: "cloud-2" }),
+        encoding: "utf-8",
+      });
+      expect(project.status, project.stderr).toBe(0);
+      expect(existsSync(mark)).toBe(true);
+      const sidestep = run("cloud-3");
+      expect(sidestep.status, sidestep.stderr).toBe(0);
+      expect(sidestep.stdout).toBe("");
 
       const elsewhere = spawnSync("sh", ["-c", command], {
         cwd: tmpdir(),
