@@ -4,8 +4,101 @@
 > that adds a [Devin](https://docs.devin.ai) harness** (Devin CLI, Devin
 > Desktop and, through a cloud plugin, Devin Cloud). See
 > [AI-DLC on Devin](#ai-dlc-on-devin) below for how to install and run it in
-> each Devin scenario. Everything else tracks upstream; the upstream installer
+> each Devin scenario, or the step-by-step guide in Portuguese,
+> [AI-DLC no Devin: passo a passo](#ai-dlc-no-devin-passo-a-passo). Everything else tracks upstream; the upstream installer
 > and release files further down do not include the Devin runtime.
+
+## AI-DLC no Devin: passo a passo
+
+Guia em português para instalar e usar o AI-DLC no Devin.
+
+### 1. Instale no projeto
+
+No terminal, dentro da pasta do projeto (ela precisa ser um repositório git),
+rode:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BrianSouza/ai-dlc-devin/main/scripts/install-devin.sh | sh
+```
+
+O comando instala o Bun se ele faltar e cria ou atualiza `.devin/`, `aidlc/`,
+`AGENTS.md` e `.gitignore`, sem apagar o que já é seu nesses arquivos. No fim
+ele roda o `doctor`, que deve dizer "0 problems". Para atualizar o AI-DLC,
+rode o mesmo comando de novo.
+
+Você também pode pedir ao próprio Devin, numa sessão, para rodar esse comando
+na raiz do repositório.
+
+### 2. Use no Devin CLI ou no Devin Desktop
+
+Na pasta do projeto, rode `devin` (ou abra a pasta no Devin Desktop) e digite:
+
+```text
+/aidlc --doctor
+/aidlc <o que você quer construir>
+```
+
+### 3. Use no Devin na nuvem
+
+Cada sessão na nuvem começa numa máquina nova, com uma cópia do repositório
+baixada do GitHub. Por isso a instalação precisa estar no GitHub, na branch
+em que as sessões começam.
+
+1. **Instale** como no passo 1, no seu computador ou numa sessão do Devin.
+2. **Faça commit e push** de `.devin/`, `aidlc/`, `AGENTS.md` e `.gitignore`.
+   Um commit que fica só na máquina da sessão some quando ela termina.
+3. **Leve o commit para a branch principal do projeto** (`main` ou
+   `master`), por exemplo com um PR e o merge. O Devin procura as skills e
+   carrega os hooks quando a sessão começa, na branch principal.
+4. **Dê acesso ao repositório** em *Settings → Repositories* no Devin.
+5. **Opcional:** para o Bun já existir no início de cada sessão, adicione ao
+   blueprint do ambiente do repositório:
+
+   ```yaml
+   initialize: |
+     curl -fsSL https://bun.sh/install | bash
+   ```
+
+   Sem isso também funciona: o primeiro hook do AI-DLC instala o Bun na
+   sessão, o que leva alguns segundos.
+6. **Abra uma sessão nova** e digite:
+
+   ```text
+   @skills:aidlc <o que você quer construir>
+   ```
+
+   Na nuvem a skill é chamada com `@skills:aidlc`; o `/aidlc` é do Devin CLI.
+
+### Testar numa branch, sem mexer na principal
+
+1. Faça push da branch com a instalação.
+2. Abra uma sessão nova e peça, logo no início, para fazer checkout dessa
+   branch.
+3. Como a skill e os hooks são carregados quando a sessão começa, na branch
+   principal, é provável que `@skills:aidlc` não apareça. Nesse caso, peça:
+
+   ```text
+   Leia .devin/skills/aidlc/SKILL.md e .devin/skills/aidlc/workflow.md inteiros e siga essas instruções para: <o que você quer construir>
+   ```
+
+   O Devin segue o fluxo do AI-DLC (fases, perguntas e aprovações), mas sem os
+   hooks: as proteções que mantêm o trabalho no plano aprovado e o registro
+   automático do que foi feito. Para ter tudo, faça o merge na principal.
+
+### Se algo der errado
+
+- **A skill `aidlc` não aparece:** confira se a instalação está na branch
+  principal no GitHub e se a sessão é nova. Na nuvem, use `@skills:aidlc`.
+  Rode o instalador de novo para pegar a versão mais recente.
+- **"bun: command not found" ou "código 127" nos hooks:** o repositório tem
+  hooks de uma versão antiga. Rode o instalador de novo, faça commit e push de
+  `.devin/` e abra uma sessão nova.
+- **Avisos do `doctor` numa sessão na nuvem:** "Devin CLI ausente" e "Bun fora
+  do PATH" são normais na nuvem e não impedem o uso; "arquivos sem commit"
+  some depois do commit.
+- **Bun só para uma sessão:** pode pedir ao Devin
+  `curl -fsSL https://bun.sh/install | bash`. Ele vai para `~/.bun`, onde os
+  hooks procuram, e vale só para aquela sessão.
 
 ## AI-DLC on Devin
 
