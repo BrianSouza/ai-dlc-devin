@@ -135,15 +135,17 @@ Type `/hooks` in Devin to confirm `.devin/hooks.v1.json` is loaded.
 
 Devin Cloud sessions (the web app, Slack, automations, `devin --cloud`) are
 not the Devin CLI on a VM: they run Devin's cloud agent, which reads a
-repository's `AGENTS.md` and skills but takes hooks only from **plugins**, and
-loads no custom subagent profiles. AI-DLC reaches them through a small plugin
+repository's `AGENTS.md` and skills, runs the repository's
+`.devin/hooks.v1.json`, and loads no custom subagent profiles. AI-DLC reaches them through a small plugin
 in this repository, `harness/devin/cloud-plugin/` (`aidlc-devin`):
 
 - it loads **only in cloud sessions** (`"platforms": ["cloud"]`), so Devin CLI
   and Devin Desktop keep using the project's own `.devin/` files and nothing
   runs twice;
 - it carries no copy of AI-DLC: its `hooks.json` runs the adapter of the
-  AI-DLC install committed in the cloned repository, its `aidlc` skill hands
+  AI-DLC install committed in the cloned repository only when that install's
+  hooks are from an older version that cannot find Bun (a current install's
+  hooks run themselves, so nothing runs twice), its `aidlc` skill hands
   over to that install's `/aidlc` conductor skill, and its `AGENTS.md` points
   the session at the install's method rule.
 

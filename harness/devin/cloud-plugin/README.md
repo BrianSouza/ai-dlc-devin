@@ -9,7 +9,10 @@ It carries no copy of AI-DLC. It runs the AI-DLC Devin install committed in
 the repository the session cloned:
 
 - `hooks.json` runs that install's `.devin/hooks/aidlc-devin-adapter.ts` for
-  each Devin event (Devin Cloud reads hooks from plugins only);
+  each Devin event when the install's own hooks cannot. Devin Cloud also runs
+  the repository's `.devin/hooks.v1.json`, and a current install's hooks find
+  Bun themselves, so for those the plugin's hooks step aside and each hook
+  runs once;
 - `skills/aidlc` finds the install and hands over to its conductor skill;
 - `AGENTS.md` points sessions at the install's standing method rule.
 
