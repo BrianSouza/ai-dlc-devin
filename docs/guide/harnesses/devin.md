@@ -143,9 +143,10 @@ in this repository, `harness/devin/cloud-plugin/` (`aidlc-devin`):
   and Devin Desktop keep using the project's own `.devin/` files and nothing
   runs twice;
 - it carries no copy of AI-DLC: its `hooks.json` runs the adapter of the
-  AI-DLC install committed in the cloned repository only when that install's
-  hooks are from an older version that cannot find Bun (a current install's
-  hooks run themselves, so nothing runs twice), its `aidlc` skill hands
+  AI-DLC install in the cloned repository whenever Devin did not load that
+  install's own hooks: an install made during the session, or an older one.
+  Once the install's own hooks run, they leave a mark and the plugin's hooks
+  step aside, so nothing runs twice. Its `aidlc` skill hands
   over to that install's `/aidlc` conductor skill, and its `AGENTS.md` points
   the session at the install's method rule.
 

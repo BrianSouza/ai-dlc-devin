@@ -2127,6 +2127,12 @@ const REPLAY_DIR = ".aidlc-devin-hook-replay";
 const REPLAY_WINDOW_MS = 2 * 60 * 1000;
 const REPLAY_WAIT_MS = 20 * 1000;
 const REPLAY_KEEP_MS = 10 * 60 * 1000;
+// Devin Cloud runs both the repository's .devin/hooks.v1.json (loaded when the
+// session starts) and the aidlc-devin plugin's hooks. The project's hooks leave
+// this mark when they run, and the plugin's launcher steps aside once it is
+// there, so each hook runs once. An install made during the session has no
+// project hooks loaded, leaves no mark, and the plugin's hooks run it.
+const PROJECT_HOOKS_MARK = "project-hooks-ran";
 
 function replayProjectDir(): string | null {
   const raw = process.env.AIDLC_PROJECT_DIR ?? process.env.DEVIN_PROJECT_DIR ?? process.cwd();
@@ -2137,6 +2143,7 @@ function replayProjectDir(): string | null {
 function pruneReplays(dir: string): void {
   try {
     for (const name of readdirSync(dir)) {
+      if (name === PROJECT_HOOKS_MARK) continue;
       const path = join(dir, name);
       if (Date.now() - statSync(path).mtimeMs > REPLAY_KEEP_MS) rmSync(path, { force: true });
     }
@@ -2156,6 +2163,7 @@ export async function runDevin(target: string, raw: string, extraArgs: string[] 
   try {
     mkdirSync(dir, { recursive: true });
     pruneReplays(dir);
+    if (process.env.AIDLC_DEVIN_CLOUD !== "1") writeFileSync(join(dir, PROJECT_HOOKS_MARK), "");
     const key = createHash("sha256").update(`${target}\0${raw}`).digest("hex").slice(0, 32);
     claim = join(dir, `${key}.claim`);
     result = join(dir, `${key}.json`);

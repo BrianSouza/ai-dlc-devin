@@ -69,6 +69,24 @@ em que as sessões começam.
 
    Na nuvem a skill é chamada com `@skills:aidlc`; o `/aidlc` é do Devin CLI.
 
+### Usar na mesma sessão, sem abrir outra
+
+Como nas outras plataformas, dá para instalar e usar o AI-DLC na mesma sessão
+do Devin na nuvem. Para isso, o plugin `aidlc-devin` precisa estar instalado
+na sua conta (ou na organização), uma vez só:
+
+1. No Devin, abra *Customize → Plugins → Add plugin → From repository* e
+   informe `BrianSouza/ai-dlc-devin`, subpasta `harness/devin/cloud-plugin`.
+2. Numa sessão (qualquer uma aberta depois de instalar o plugin), peça ao
+   Devin para rodar o comando de instalação do passo 1 na raiz do
+   repositório.
+3. Na mesma sessão, digite `@skills:aidlc <o que você quer construir>`.
+
+O plugin acha a instalação na pasta do repositório e roda as skills e os
+hooks do AI-DLC dali em diante, sem precisar de sessão nova. Para as próximas
+sessões também terem o AI-DLC, faça commit e push da instalação e leve para a
+branch principal, como no passo 3.
+
 ### Testar numa branch, sem mexer na principal
 
 1. Faça push da branch com a instalação.
@@ -83,7 +101,10 @@ em que as sessões começam.
 
    O Devin segue o fluxo do AI-DLC (fases, perguntas e aprovações), mas sem os
    hooks: as proteções que mantêm o trabalho no plano aprovado e o registro
-   automático do que foi feito. Para ter tudo, faça o merge na principal.
+   automático do que foi feito. Com o plugin `aidlc-devin` instalado na sua
+   conta (veja "Usar na mesma sessão" acima), `@skills:aidlc` e os hooks
+   funcionam também depois do checkout. Sem o plugin, faça o merge na
+   principal para ter tudo.
 
 ### Se algo der errado
 
